@@ -1,0 +1,6 @@
+[submodule "optimized_dp"]
+	path = optimized_dp
+	url = https://github.com/CMU-IntentLab/optimized_dp
+[submodule "safety_rl"]
+	path = safety_rl
+	url = https://github.com/CMU-IntentLab/safety_rl
