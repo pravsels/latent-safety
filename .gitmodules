@@ -3,4 +3,5 @@
 	url = https://github.com/CMU-IntentLab/optimized_dp
 [submodule "safety_rl"]
 	path = safety_rl
-	url = https://github.com/CMU-IntentLab/safety_rl/tree/avoid_only
+	url = https://github.com/CMU-IntentLab/safety_rl/
+	branch = avoid_only
