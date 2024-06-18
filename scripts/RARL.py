@@ -26,6 +26,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import torch
+import yaml
 
 from safety_rl.RARL.DDQNSingle import DDQNSingle
 from safety_rl.RARL.config import dqnConfig
@@ -142,6 +143,11 @@ parser.add_argument(
 args = parser.parse_args()
 print(args)
 
+config_path = '/home/kensuke/latent-safety/configs/config.yaml'
+with open(config_path, 'r') as file:
+  config = yaml.safe_load(file)
+
+
 # == CONFIGURATION ==
 env_name = "dubins_car-v1"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -149,7 +155,7 @@ maxUpdates = args.maxUpdates
 updateTimes = args.updateTimes
 updatePeriod = int(maxUpdates / updateTimes)
 updatePeriodHalf = int(updatePeriod / 2)
-maxSteps = 100
+maxSteps = config['numT'] #100
 
 # == Environment ==
 print("\n== Environment Information ==")
@@ -161,7 +167,7 @@ elif args.doneType == 'TF' or args.doneType == 'fail':
 print(env_name)
 print(gym_reachability)
 env = gym.make(
-    env_name, device=device, mode=args.mode, doneType=args.doneType,
+    env_name, config=config, device=device, mode=args.mode, doneType=args.doneType,
     sample_inside_obs=sample_inside_obs
 )
 
@@ -204,15 +210,13 @@ print(
 )
 
 # == Setting in this Environment ==
-env.set_speed(speed=args.speed)
-env.set_target(radius=args.targetRadius)
-env.set_constraint(radius=args.consRadius)
-env.set_radius_rotation(R_turn=args.turnRadius)
+env.set_speed(speed=config['speed'])
+env.set_constraint(radius=config['obs_r'])
+env.set_radius_rotation(R_turn=config['speed']/config['u_max'])
 print("Dynamic parameters:")
 print("  CAR", end='\n    ')
 print(
     "Constraint: {:.1f} ".format(env.car.constraint_radius)
-    + "Target: {:.1f} ".format(env.car.target_radius)
     + "Turn: {:.2f} ".format(env.car.R_turn)
     + "Max speed: {:.2f} ".format(env.car.speed)
     + "Max angular speed: {:.3f}".format(env.car.max_turning_rate)
@@ -220,7 +224,6 @@ print(
 print("  ENV", end='\n    ')
 print(
     "Constraint: {:.1f} ".format(env.constraint_radius)
-    + "Target: {:.1f} ".format(env.target_radius)
     + "Turn: {:.2f} ".format(env.R_turn)
     + "Max speed: {:.2f} ".format(env.speed)
 )
@@ -274,10 +277,9 @@ if args.plotFigure or args.storeFigure:
 
   ax = axes[1]
   im = ax.imshow(
-      v.T, interpolation='none', extent=axStyle[0], origin="lower",
+      v.T > 0, interpolation='none', extent=axStyle[0], origin="lower",
       cmap="seismic", vmin=vmin, vmax=vmax, zorder=-1
   )
-  env.plot_reach_avoid_set(ax)
   cbar = fig.colorbar(
       im, ax=ax, pad=0.01, fraction=0.05, shrink=.95, ticks=[vmin, 0, vmax]
   )

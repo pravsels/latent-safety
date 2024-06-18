@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import pickle
+import yaml
 
 
 def visualize(model,u_max, v, dt):
@@ -82,10 +83,10 @@ def visualize(model,u_max, v, dt):
       plt.savefig('logs/dynamics_img/'+title+'.png')
       plt.show()
 
-def train_dyn(x_min, x_max, y_min, y_max, u_max, dt, v):
+def train_dyn(x_min, x_max, y_min, y_max, u_max, dt, v, config):
   
 
-  with open('datasets/dyn_data.pkl', 'rb') as f:
+  with open(config['dyn_img_data'], 'rb') as f:
     dataset = pickle.load(f)
   i,i_n, s, s_n, a = dataset
   num_pts = len(i)
@@ -207,21 +208,31 @@ def train_dyn(x_min, x_max, y_min, y_max, u_max, dt, v):
   return encoder, dynamics
 
 
-def train_and_vis(x_min, x_max, y_min, y_max, u_max, dt, v):
-  encoder, dynamics = train_dyn(x_min, x_max, y_min, y_max, u_max, dt, v)
+def train_and_vis(x_min, x_max, y_min, y_max, u_max, dt, v, config):
+  encoder, dynamics = train_dyn(x_min, x_max, y_min, y_max, u_max, dt, v, config)
   visualize(dynamics, u_max, v, dt)
-  torch.save(dynamics.state_dict(), 'logs/dynamics_img/dynamics_img.pth')
-  torch.save(encoder.state_dict(), 'logs/dynamics_img/encoder_img.pth')
+  torch.save(dynamics.state_dict(), config['dyn_img_path'])
+  torch.save(encoder.state_dict(), config['enc_img_path'])
 
 
   
 if __name__=='__main__':
-    dt = 0.05
-    u_max = 1.25
-    x_min = -1.1
-    x_max = 1.1
-    y_min = -1.1
-    y_max = 1.1
-    v = 1
+    config_path = '/home/kensuke/latent-safety/configs/config.yaml'
+    with open(config_path, 'r') as file:
+      config = yaml.safe_load(file)
+    
+    x_min = config['x_min']
+    x_max = config['x_max']
+    y_min = config['y_min']
+    y_max = config['y_max']
+    u_max = config['u_max']
+    dt = config['dt']
+    v = config['speed']
+    dt = config['dt']
+
+    dyn_path = config['dyn_img_path']
+    enc_path = config['enc_img_path']
+    enc_path = config['enc_img_path']
+
     torch.manual_seed(0)
-    train_and_vis(x_min, x_max, y_min, y_max, u_max, dt, v)
+    train_and_vis(x_min, x_max, y_min, y_max, u_max, dt, v, config)

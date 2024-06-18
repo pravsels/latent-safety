@@ -15,6 +15,7 @@ import torch.optim as optim
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+import yaml
 
 
 
@@ -157,21 +158,28 @@ def train_dyn(x_min, x_max, y_min, y_max, u_max, dt, v, num_pts):
   return model
 
 
-def train_and_vis(x_min, x_max, y_min, y_max, u_max, dt, v, num_pts):
+def train_and_vis(x_min, x_max, y_min, y_max, u_max, dt, v, num_pts, path):
   model = train_dyn(x_min, x_max, y_min, y_max, u_max, dt, v, num_pts)
   visualize(model, u_max, v, dt)
-  torch.save(model.state_dict(), 'logs/dynamics/dynamics.pth')
+  torch.save(model.state_dict(), path)
 
 
   
 if __name__=='__main__':
-    dt = 0.05
-    u_max = 1.25
-    x_min = -1.1
-    x_max = 1.1
-    y_min = -1.1
-    y_max = 1.1
-    v = 1
-    num_pts = 5000
+    config_path = '/home/kensuke/latent-safety/configs/config.yaml'
+    with open(config_path, 'r') as file:
+      config = yaml.safe_load(file)
+    
+    x_min = config['x_min']
+    x_max = config['x_max']
+    y_min = config['y_min']
+    y_max = config['y_max']
+    u_max = config['u_max']
+    dt = config['dt']
+    v = config['speed']
+    dt = config['dt']
+    path = config['dyn_path']
+  
+    num_pts = config['num_pts']
     torch.manual_seed(0)
-    train_and_vis(x_min, x_max, y_min, y_max, u_max, dt, v, num_pts)
+    train_and_vis(x_min, x_max, y_min, y_max, u_max, dt, v, num_pts, path)

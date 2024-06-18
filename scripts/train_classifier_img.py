@@ -5,6 +5,7 @@ import os
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 print(sys.path)
+import yaml
 
 
 from generate_data import *
@@ -94,8 +95,8 @@ def visualize(model, encoder, x_c,y_c,r, contrastive, mode, safe_img, safe, unsa
 
 
 
-def train_model(contrastive=False, mode=None):
-  with open('/home/kensuke/latent-safety/datasets/classifier_data.pkl', 'rb') as f:
+def train_model(config, contrastive=False, mode=None):
+  with open(config['lx_img_data'], 'rb') as f:
     dataset = pickle.load(f)
   safe_img,safe, unsafe_img, unsafe = dataset
   num_pts = len(safe_img)
@@ -194,14 +195,21 @@ def train_model(contrastive=False, mode=None):
   return model, encoder, safe_img[:num_eval], safe[:num_eval], unsafe_img[:num_eval], unsafe[:num_eval]
 
 
-def train_and_vis(x,y,r, contrastive=True, mode=None):
-  model, encoder, safe_img, safe, unsafe_img, unsafe = train_model(contrastive, mode)
+def train_and_vis(x,y,r, config, contrastive=True, mode=None):
+  model, encoder, safe_img, safe, unsafe_img, unsafe = train_model(config, contrastive, mode)
   visualize(model, encoder, x,y,r, contrastive, mode, safe_img, safe, unsafe_img, unsafe)
-  torch.save(model.state_dict(), 'logs/classifier_img/failure_set_img.pth')
+  torch.save(model.state_dict(), config['lx_img_path'])
 
 
 
 
 if __name__=='__main__':
-    torch.manual_seed(0)
-    train_and_vis(0,0, 0.5, contrastive=True, mode='ring')
+  config_path = '/home/kensuke/latent-safety/configs/config.yaml'
+  with open(config_path, 'r') as file:
+    config = yaml.safe_load(file)
+  obs_x = config['obs_x']
+  obs_y = config['obs_y']
+  obs_r = config['obs_r']
+  path = config['lx_img_path']
+    
+  train_and_vis(obs_x,obs_y, obs_r, config, contrastive=True, mode='ring')

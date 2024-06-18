@@ -4,6 +4,7 @@ import os
 # Add the parent directory to sys.path
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
+import yaml
 
 from generate_data import *
 
@@ -195,17 +196,20 @@ def train_model(x_c, y_c, r, contrastive=False, mode=None, spectral=False):
   return model, safe[int(0.2*num_pts):], unsafe[int(0.2*num_pts):]
 
 
-def train_and_vis(x,y,r, contrastive=True, mode=None, spectral=True):
+def train_and_vis(x,y,r, contrastive=True, mode=None, spectral=True, path = None):
   model, safe, unsafe = train_model(x,y,r,contrastive, mode, spectral)
   visualize(model,x,y,r, contrastive, mode, spectral, safe=safe, unsafe=unsafe)
-  torch.save(model.state_dict(), 'logs/classifier/failure_set.pth')
+  torch.save(model.state_dict(), path)
 
 
 
 
 if __name__=='__main__':
-    x_c = 0.0
-    y_c = 0.0
-    r = 0.5
+    config_path = '/home/kensuke/latent-safety/configs/config.yaml'
+    with open(config_path, 'r') as file:
+      config = yaml.safe_load(file)
+    obs_x = config['obs_x']
+    obs_y = config['obs_y']
+    obs_r = config['obs_r']
     torch.manual_seed(0)
-    train_and_vis(x_c, y_c, r, contrastive=True, mode='ring', spectral=False)
+    train_and_vis(obs_x, obs_y, obs_r, contrastive=True, mode='ring', spectral=False, path = config['lx_path'])

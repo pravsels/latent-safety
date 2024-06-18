@@ -1,11 +1,13 @@
 # num datapts for training encoder, transition, classifier
 num_pts: 5000
 
-classifier_path: /home/kensuke/latent-safety/logs/classifier/failure_set.pth
-classifier_img_path: /home/kensuke/latent-safety/logs/classifier_img/failure_set_img.png
-dynamics_path: /home/kensuke/latent-safety/logs/dynamics/dynamics.pth
-dynamics_img_path: /home/kensuke/latent-safety/logs/dynamics_img/dynamics_img.png
-encoder_img_path: /home/kensuke/latent-safety/logs/dynamics_img/encoder_img.png
+lx_path: /home/kensuke/latent-safety/logs/classifier/failure_set.pth
+lx_img_path: /home/kensuke/latent-safety/logs/classifier_img/failure_set_img.pth
+dyn_path: /home/kensuke/latent-safety/logs/dynamics/dynamics.pth
+dyn_img_path: /home/kensuke/latent-safety/logs/dynamics_img/dynamics_img.pth
+enc_img_path: /home/kensuke/latent-safety/logs/dynamics_img/encoder_img.pth
+dyn_img_data: /home/kensuke/latent-safety/datasets/dyn_data.pkl
+lx_img_data: /home/kensuke/latent-safety/datasets/classifier_data.pkl
 
 
 # HJ computation bounds
@@ -18,6 +20,10 @@ numT: 100
 nx: 101
 ny: 101
 nz: 101
+
+obs_x: 0
+obs_y: 0
+obs_r: 0.5
 
 # Dubins car parameters
 u_max: 1.25
