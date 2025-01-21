@@ -290,4 +290,7 @@ offsetr_ood:
   obs_r: 1.0
 
 reduced_actions_wm_ablation:
+  name: 'reduced_actions_wm_ablation'
+  from_ckpt: /home/lassepe/worktree/latent-safety/logs/dreamer_dubins/0121/062711/best_pretrain_joint_0_14.pt
+  lx_ckpt: /home/lassepe/worktree/latent-safety/logs/dreamer_dubins/0121/062711/best_classifier_0_01.pt
   wm_dataset_path: /home/lassepe/worktree/latent-safety/datasets/demos128_reduced_actions.pkl
