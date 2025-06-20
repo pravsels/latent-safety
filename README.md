@@ -1,3 +1,5 @@
+# Update: We now provide training code for DINO-WM and the DINO-WM latent safety filter in the `dino` branch
+
 # Latent-space Reachability in Pytorch
 
 This is a repository for doing latent-space HJ reachability analysis using the Discounted Safety/Reach-avoid Bellman equation originally introduced in [this](https://ieeexplore.ieee.org/abstract/document/8794107) and [this](https://arxiv.org/abs/2112.12288) paper. This entire repository is heavily based on [Jingqi Li's Repo](https://github.com/jamesjingqili/Lipschitz_Continuous_Reachability_Learning) which uses Tianshou for RL. We also use the RSSM world model as implemented in [this](https://github.com/NM512/dreamerv3-torch) implementation of Dreamer-v3. 
