@@ -3,7 +3,7 @@
 This is a minimal repository for doing HJ reachability analysis using the Discounted Safety/Reach-avoid Bellman equation originally introduced in [this](https://ieeexplore.ieee.org/abstract/document/8794107) and [this](https://arxiv.org/abs/2112.12288) paper. We build on the implementation used as baselines from [Jingqi Li's Repo](https://github.com/jamesjingqili/Lipschitz_Continuous_Reachability_Learning). 
 
 
-This repository supports SAC and DDPG implementations of both the safety-only and reach-avoid value functions. I have not yet tested HJ with disturbances.
+This branch of the repository supports a DDPG implementations of the safety-only value functions. I have not yet tested HJ with disturbances.
 
 
 We recommend Python version 3.12. 
