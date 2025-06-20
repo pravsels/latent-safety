@@ -22,54 +22,38 @@ Install instruction:
 # Some sample training scripts:
 
 
-## Latent reachabilityAdd commentMore actions
+## DINO-WM Training
+
+To train DINO-WM, we need to first collect all of our data. The repository assumes data is collected in a folder `/data` with trajectories by the name `traj_XXXX.hdf5`. We provide one example of such a trajectory in `dino_wm/traj_0000.hdf5`.
+
+First, we label each trajectory with failure labels. We provide a script to do so, but feel free to devise other ways beyond hand-labeling for this step.
+> cd dino_wm && python label.py
+
+We now consolidate all of our data into one file using
+> python hdf5_to_dataset.py
+
+This may take a while. We recommend setting aside some trajectories for evaluation in a separate directory (e.g., `/data-test`) and rerunning this script.
+
+We can now proceed to train DINO-WM. First, train the decoder:
+> python train_dino_decoder.py
+
+With the decoder in hand, we can now qualitatively monitor the world model's training:
+> python train_dino_wm.py
+
+Finally, we train the failure classifier with 
+> python train_dino_classifer.py
+
+We can see how well our failure classifier does by computing a confusion matrix for how well our failure classifer performs on the held-out data.
+> python eval_dino_classifier.py
+
+If all looks good (low FP and FN rates), lets train our latent safety filter!
+
+> cd ../scripts && python run_training_ddpg-dinowm.py
 
 
+We can similarly evaluate our BRT using 
+> cd ../dino_wm && python eval_dino_brt.py
 
 
-
-To get the offline dataset for a Dubin's car model
-
-
-> python scripts/generate_data_cont.py
-
-
-
-
-
-World model training from the offline dataset
-
-
-> python scripts/dreamer_offline.py
-
-
-
-
-
-Reachability analysis in the world model
-
-
-> python scriptsrun_training_ddpg-wm.py
-
-
-
-
-
-## vanila reachability
-
-For a Dubins Car Reach-avoid example: 
-
-> python scripts/run_training_sac_RA_nodist.py --control-net 512 512 512 512 --critic-net 512 512 512 512 --epoch 1 --total-episodes 80
-
-For a Dubins car avoid-only example: 
-
-> python scripts/run_training_sac_nodist.py --control-net 512 512 512 --critic-net 512 512 512 --epoch 1 --total-episodes 40
-
-Finally, we recommend always setting the action space to range from -1 to 1 in the gym.env definition, but we can scale or shift the actions within the gym.step() function when defining the dynamics. For example, if we have two double integrator dynamics: the first integrator’s control is bounded by -0.1 to 0.1, and the second integrator’s control is bounded by -0.3 to 0.3. In this case, we can define self.action_space = spaces.Box(-1, 1, shape=(2,), dtype=np.float64) and implement the dynamics in gym.step(self, u) as follows:
-
-
-**A key thing to notice is that the initial state distribution should cover a portion of the target set for reach-avoid settings. Otherwise, no state in the target set shows up in the data buffer and therefore, the policy cannot see where it should go to maximize the value function. **
-
-In addition, we remark that the convergence of critic loss implies that the neural network value function approximates well the value function induced by the current learned policy. However, it does not mean the learning is done because we cannot tell the quality of policies by just looking at the critic loss. In minimax DDPG, it improves the learned policy by minimizing the control actor loss, and refines the disturbance policy by maximizing the disturbance actor loss. However, we observe that a small critic loss stabilizes the multi-agent reinforcement learning training, and therefore helps policy learning. 
-
-
+## Helpful tips:
+You may want to crop your front-facing camera view to be a bit more in focus. We provide `vis_data.ipynb` to let you view your camera data and the corresponding DINOv2 embeddings.
