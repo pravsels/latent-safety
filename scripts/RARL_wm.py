@@ -545,6 +545,7 @@ def get_config(parse_args=True, root_key="defaults"):
   cprint(f"Experiment name: {config.expt_name}", "red", attrs=["bold"])
   cprint(f"Task: {final_config.task}", "cyan", attrs=["bold"])
   cprint(f"Logging to: {final_config.logdir}", "cyan", attrs=["bold"])
+  cprint(f"Configuration name: {final_config.name}", "cyan", attrs=["bold"])
   print("---------------------")
   return final_config
 
