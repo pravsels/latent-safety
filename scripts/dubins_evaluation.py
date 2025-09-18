@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from matplotlib.pylab import rcParams
 # set high dpi for publication-ready figures
 rcParams['figure.dpi'] = 300
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = " 0"
 
 import RARL_wm
 import RARL
@@ -523,9 +523,10 @@ env_priv, environment_info_priv = RARL.construct_environment(config_priv)
 agent_priv = load_best_privileged_agent(config_priv, environment_info_priv)
 
 # %% base setup
+default_root_key = "defaults" #"reduced_actions_wm_ablation"
 position_gridsize = 10
 angle_gridsize = 3
-default_config = RARL_wm.get_config(parse_args=False)
+default_config = RARL_wm.get_config(parse_args=False, root_key=default_root_key)
 default_env, default_environment_info = RARL_wm.construct_environment(
     default_config, visualize_failure_sets=False
 )

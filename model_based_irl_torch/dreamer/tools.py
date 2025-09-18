@@ -1777,6 +1777,10 @@ def plot_heatmap(*, fig, ax, data, title=None, vmin, vmax, theme, domain, bounda
         cmap=cmap,
         norm=norm,
     )
+    # plot a gray box in the background
+    # im = ax.imshow(
+    #     np.zeros_like(data.T), cmap=cmap, norm=norm, extent=np.array([-1.1, 1.1, -1.1, 1.1])
+    # )
 
     if boundary_data is not None:
         ax.contour(
