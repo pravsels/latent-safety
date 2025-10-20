@@ -1,16 +1,18 @@
 
+import os, argparse
+import matplotlib
+matplotlib.use("Agg")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-import argparse
-import io
+import io, sys, threading
 from PIL import Image
 import numpy as np
-import torch
-import pickle
-import pathlib
+import torch, pickle, pathlib
 import ruamel.yaml as yaml
-import os
-import sys
+import multiprocessing as mp
 
 # Make parent project dirs importable (so we can import `tools` below).
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -20,6 +22,7 @@ dreamer_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../dreame
 sys.path.append(dreamer_dir)
 import tools
 
+# ---------------------------- Rendering ----------------------------
 
 def get_frame(states, config):
   """
@@ -27,8 +30,7 @@ def get_frame(states, config):
 
   Args:
     states (torch.Tensor shape [3]): [x, y, theta].
-    config: parsed config with fields like size, bounds, obstacle params,
-    dt (time step), speed, etc.
+    config: parsed config with fields like size, bounds, obstacle params, dt (time step), speed, etc.
 
   Returns:
     np.ndarray (H, W, 3) uint8 image.
@@ -44,22 +46,22 @@ def get_frame(states, config):
   fig.set_size_inches(1, 1)
 
   # Create and draw the obstacle (red circle outline).
-  circle = patches.Circle([config.obs_x, config.obs_y], config.obs_r, edgecolor=(1,0,0), facecolor='none')
+  circle = patches.Circle([config.obs_x, config.obs_y], config.obs_r, edgecolor=(1, 0, 0), facecolor='none')
   # Add the circle patch to the axis
   ax.add_patch(circle)
 
-  # Draw a blue velocity arrow of length v*dt pointing along heading theta.
+  # Draw a blue velocity arrow of length v * dt pointing along heading theta.
   # Note: quiver params tuned for tiny canvas; avoid unsupported kwargs.
   plt.quiver(
     states[0], states[1], 
     dt * v * torch.cos(states[2]), 
     dt * v * torch.sin(states[2]), 
-    angles='xy', scale_units='xy', minlength=0, width=0.1, scale=0.18, 
+    angles='xy', scale_units='xy', width=0.1, scale=0.18, 
     color=(0, 0, 1), zorder=3
   )
 
   # Draw the agent position as a blue dot.
-  plt.scatter(states[0], states[1], s=20, c=(0, 0, 1), zorder=3)
+  plt.scatter(states[0], states[1], s=20, color=(0, 0, 1), zorder=3)
   plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
   # Rasterize figure to an in-memory PNG and decode to an RGB array.
@@ -71,6 +73,8 @@ def get_frame(states, config):
   plt.close(fig)    # free figure resources!
 
   return img_array
+
+# ------------------------ State / Dynamics -------------------------
    
 def get_init_state(config):  
   """
@@ -81,12 +85,13 @@ def get_init_state(config):
   states = torch.zeros(3)
 
   # Rejection-sample (x, y) outside the obstacle circle.
+  # while loop keeps going until we have a point outisde the circle. 
   while np.linalg.norm(states[:2] - np.array([config.obs_x, config.obs_y])) < config.obs_r:
     states = torch.rand(3)
 
     # Sample within bounds minus buffer for x and y.
-    states[0] *= (config.x_max-config.buffer) - (config.x_min + config.buffer)
-    states[1] *= (config.y_max-config.buffer) - (config.y_min + config.buffer)
+    states[0] *= (config.x_max - config.buffer) - (config.x_min + config.buffer)
+    states[1] *= (config.y_max - config.buffer) - (config.y_min + config.buffer)
     states[0] += config.x_min + config.buffer
     states[1] += config.y_min + config.buffer
 
@@ -95,6 +100,29 @@ def get_init_state(config):
   states[2] = states[2] % (2 * np.pi)   # wrap into [0, 2π)
 
   return states
+
+# ------------------------- Serialization --------------------------
+
+def to_python_demo(state_obs, acs, state_gt, img_obs, dones):
+  """Convert tensors to compact, pickle-friendly Python/NumPy types."""
+  # Scalars to float, arrays to np.float32, images already np.uint8
+  obs_state = [float(th) for th in state_obs]
+  actions = [float(a) for a in acs]
+  priv = [np.asarray(s, dtype=np.float32) for s in state_gt]
+
+  demo = {
+    'obs': {
+      'image': img_obs,     # list[np.uint8 HxWx3]
+      'state': obs_state,   # list[float]
+      'priv_state': priv,   # list[np.float32(3,)]
+    },
+    'actions': actions, # list[float]
+    'dones': [int(d) for d in dones],
+  }
+
+  return demo
+
+# ---------------------- Trajectory generation ----------------------
 
 def gen_one_traj_img(config):
   """
@@ -121,10 +149,10 @@ def gen_one_traj_img(config):
 
   for t in range(config.data_length):
     # Sample action uniformly in [-u_max, +u_max].
-    ac = torch.rand(1) * 2 * u_max - u_max
+    ac = torch.rand(()) * 2 * u_max - u_max
 
     # Single-step Dubins dynamics 
-    states_next = torch.rand(3)
+    states_next = torch.empty(3, dtype=states.dtype)
     states_next[0] = states[0] + v * dt * torch.cos(states[2])
     states_next[1] = states[1] + v * dt * torch.sin(states[2])
     states_next[2] = states[2] + dt * ac
@@ -157,33 +185,42 @@ def gen_one_traj_img(config):
 
   return state_obs, acs, state_gt, img_obs, dones
 
-def generate_trajs(config):
-  """
-  Generate `config.num_trajs` independent trajectories and dump them
-  into a pickle file named by resolution (e.g., wm_demos128.pkl).
-  """
-  demos = []
-  for i in range(config.num_trajs):
-    state_obs, acs, state_gt, img_obs, dones = gen_one_traj_img(config)
+def _worker_batch(count: int, cfg, q: mp.Queue):
+    """Worker: build `count` trajectories, pickle into one bytes blob, put on queue."""
+    payloads = []
+    for _ in range(count):
+        state_obs, acs, state_gt, img_obs, dones = gen_one_traj_img(cfg)
+        demo = to_python_demo(state_obs, acs, state_gt, img_obs, dones)
+        payloads.append(pickle.dumps(demo, protocol=pickle.HIGHEST_PROTOCOL))
+    blob = b"".join(payloads)
+    q.put((blob, count))  # send (bytes, num_trajs)
 
-    # Package one trajectory. Key names should match your training pipeline.
-    demo = {
-      'obs': {
-        'image': img_obs,
-        'state': state_obs,       # note: encoder may expect 'obs_state'
-        'priv_state': state_gt,   # optional: full-state debug
-      },
-      'actions': acs,
-      'dones': dones,
-    }
+def _writer_thread(q: mp.Queue, out_path: str, flush_bytes: int, total_trajs: int):
+    """Single writer: append blobs; print simple progress."""
+    buf = []
+    sz = 0
+    done = 0
+    with open(out_path, "ab", buffering=4 * 1024 * 1024) as f:
+        while True:
+            item = q.get()  # blocks
+            if item is None:  # sentinel -> drain and exit
+                for b, _n in buf:
+                    f.write(b)
+                print(f"[writer] progress: {done}/{total_trajs} (100%)")
+                return
+            blob, n_trajs = item
+            buf.append((blob, n_trajs))
+            sz += len(blob)
+            done += n_trajs
+            # Print on every blob (cheap) or only on flush — your call:
+            print(f"[writer] progress: {done}/{total_trajs}")
+            if sz >= flush_bytes:
+                for b, _n in buf:
+                    f.write(b)
+                buf.clear()
+                sz = 0
 
-    demos.append(demo)
-    print('demo: ', i, "timesteps: ", len(state_obs))
-
-    # WARNING: This ignores config.dataset_path and always writes to
-    # wm_demos{size[0]}.pkl in CWD. Adjust if needed.
-    with open('wm_demos'+str(config.size[0])+'.pkl', 'wb') as f:
-      pickle.dump(demos, f)
+# ----------------------------- Main --------------------------------
 
 def recursive_update(base, update):
     """Recursively merge dict `update` into dict `base` in-place."""
@@ -194,31 +231,56 @@ def recursive_update(base, update):
             base[key] = value
 
 if __name__ == '__main__':
-  # First, build an "empty" argparse and unknown args as remaining. 
-  # This will be parsed after we derive types from YAML defaults.
-  parser = argparse.ArgumentParser()
-  config, remaining = parser.parse_known_args()
+    # Build config from YAML + CLI (your existing code)
+    parser = argparse.ArgumentParser()
+    _, remaining = parser.parse_known_args()
+    yaml_loader = yaml.YAML(typ='safe', pure=True)
+    configs = yaml_loader.load((pathlib.Path(sys.argv[0]).parent / '../configs.yaml').read_text())
+    defaults = {}
+    for name in ['defaults']:
+        recursive_update(defaults, configs[name])
+    parser = argparse.ArgumentParser()
+    for key, value in sorted(defaults.items(), key=lambda x: x[0]):
+        arg_type = tools.args_type(value)
+        parser.add_argument(f'--{key}', type=arg_type, default=arg_type(value))
 
-  # Load `../configs.yaml` using ruamel.yaml (safe loader, pure Python).
-  yaml_loader = yaml.YAML(typ='safe', pure=True)
-  configs = yaml_loader.load((pathlib.Path(sys.argv[0]).parent / '../configs.yaml').read_text())
+    # Parallel + queue knobs (small + sensible defaults)
+    parser.add_argument('--workers', type=int, default=max(1, (os.cpu_count()) - 1))
+    parser.add_argument('--chunk_size', type=int, default=100, help='Trajs per worker batch.')
+    parser.add_argument('--flush_mb', type=int, default=16, help='Writer flush threshold (MB).')
+    parser.add_argument('--queue_items', type=int, default=100, help='Max queued blobs (backpressure).')
 
-  # You can stack multiple named blocks, here we only merge 'defaults'.
-  name_list = ['defaults']
-  defaults = {}
-  for name in name_list:
-    recursive_update(defaults, configs[name])
+    cfg = parser.parse_args(remaining)
 
-  # Now that we have a defaults dict, expose every key as a CLI flag.
-  # `tools.args_type` should infer an argparse type from the default value.
-  parser = argparse.ArgumentParser()
-  for key, value in sorted(defaults.items(), key=lambda x: x[0]):
-    arg_type = tools.args_type(value)
-    parser.add_argument(f'--{key}', type=arg_type, default=arg_type(value))
+    # Where to write (single file)
+    out_path = cfg.dataset_path  # e.g., wm_demos128.pkl
+    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
 
-  # Parse remaining CLI args into a Namespace. This becomes our global config.
-  final_config = parser.parse_args(remaining)
+    # Setup queue + writer
+    ctx = mp.get_context('spawn')  # macOS-friendly
+    q: mp.Queue = ctx.Queue(maxsize=cfg.queue_items)
+    writer = threading.Thread(
+      target=_writer_thread,
+      args=(q, out_path, int(cfg.flush_mb) * 1024 * 1024, int(cfg.num_trajs)),
+      daemon=True,
+    )
+    writer.start()
 
-  # Generate and save trajectories according to config.
-  demos = generate_trajs(final_config)
+    # Launch workers (each produces one blob with `chunk_size` trajs)
+    procs = []
+    remaining_trajs = int(cfg.num_trajs)
+    while remaining_trajs > 0:
+        take = min(cfg.chunk_size, remaining_trajs)
+        p = ctx.Process(target=_worker_batch, args=(take, cfg, q))
+        p.start()
+        procs.append(p)
+        remaining_trajs -= take
 
+    # Wait for workers, then stop writer
+    for p in procs:
+        p.join()
+
+    q.put(None)  # sentinel to stop writer after draining
+    writer.join()
+
+    print(f"Written dataset (streamed): {out_path}")

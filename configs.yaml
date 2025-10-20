@@ -14,10 +14,12 @@ defaults:
 
   # offline data parameters
   data_length: 100
-  num_trajs: 4000 # 2000 in paper
-  num_train_trajs: 3800 #1900 in paper
+  num_trajs: 4000                     # 2000 in paper
+  num_train_trajs: 3800               # 1900 in paper
+  # num_trajs: 2000                     
+  # num_train_trajs: 1900            
   size: [128, 128]
-  dataset_path: 'wm_demos128.pkl' # '128' should be the same as the size above
+  dataset_path: 'wm_demos128.pkl'     # '128' should be the same as the size above
   
   # offline dreamer parameters, these are from https://github.com/NM512/dreamerv3-torch
   logdir: 'logs/dreamer_dubins' 
@@ -40,7 +42,7 @@ defaults:
   debug: False
   video_pred_log: True
 
-  rssm_train_steps: 10000 # 100000 in paper
+  rssm_train_steps: 10000     # 100000 in paper
   
   # Environment
   task: 'dubins-wm'
