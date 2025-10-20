@@ -1,3 +1,5 @@
+*.pkl 
+
 *.egg-info
 experiment_script/log
 **/__pycache__/
