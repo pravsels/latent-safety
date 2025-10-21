@@ -1,18 +1,14 @@
 # This file is based on https://github.com/NM512/dreamerv3-torch/tree/main (MIT License)
 # Original author: NM512
-# Modified by: Kensuke Nakamura, 2025
+# dreamer_offline.py 
 
-import argparse
-import functools
-import os
-import pathlib
-import sys
+import argparse, functools, os, pathlib, sys 
 
+# Set environment variables for headless rendering.
 os.environ["MUJOCO_GL"] = "osmesa"
 
 import numpy as np
 import ruamel.yaml as yaml
-
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
@@ -21,14 +17,10 @@ sys.path.append(dreamer)
 sys.path.append(str(pathlib.Path(__file__).parent))
 
 import exploration as expl
-import models
-import tools
-import envs.wrappers as wrappers
-from parallel import Parallel, Damy
+import models, tools 
 
 import torch
 from torch import nn
-from torch import distributions as torchd
 import collections
 
 from tqdm import trange
@@ -37,13 +29,30 @@ import matplotlib.pyplot as plt
 import gym
 from io import BytesIO
 from PIL import Image
-import matplotlib.patches as patches
-import io
 
-to_np = lambda x: x.detach().cpu().numpy()
 from generate_data_traj_cont import get_frame
 
+# Helper lambda to move a tensor to CPU and convert it to a NumPy array.
+to_np = lambda x: x.detach().cpu().numpy()
+
+# --------------------------- Main Dreamer Agent ---------------------------
+
 class Dreamer(nn.Module):
+    """
+    Dreamer container that:
+      - Holds the World Model (encoder, RSSM, decoder, heads).
+      - Builds the task behavior (actor/critic in latent space).
+      - Trains the world model and behavior on offline batches.
+      - Provides plotting helpers to visualize a safety margin head g(x).
+
+    Key pieces:
+      _wm                 : models.WorldModel (Encoder + RSSM + Heads)
+      _task_behavior      : models.ImagBehavior (actor/critic on imagined rollouts)
+      _expl_behavior      : exploration policy (random/plan2explore), used if not 'greedy'
+      _metrics            : running dict of scalar lists for logging
+      _step               : environment-equivalent step counter (logger.step / action_repeat)
+      pretrain_opt        : optimizer for model + actor during pretraining
+    """
     def __init__(self, obs_space, act_space, config, logger, dataset):
         super(Dreamer, self).__init__()
         self._config = config
@@ -55,17 +64,26 @@ class Dreamer(nn.Module):
         self._should_reset = tools.Every(config.reset_every)
         self._should_expl = tools.Until(int(config.expl_until / config.action_repeat))
         self._metrics = {}
+
         # this is update step
         self._step = logger.step // config.action_repeat
         self._update_count = 0
+
+        # Offline dataset iterator
         self._dataset = dataset
+
+        # World model (encoder, RSSM, heads) + behavior on imagined rollouts.
         self._wm = models.WorldModel(obs_space, act_space, self._step, config)
         self._task_behavior = models.ImagBehavior(config, self._wm)
+
+        # Optionally compile with torch.compile
         if (
             config.compile and os.name != "nt"
         ):  # compilation is not supported on windows
             self._wm = torch.compile(self._wm)
             self._task_behavior = torch.compile(self._task_behavior)
+        
+        # Exploration behavior (usually not used in pure offline; kept for completeness).
         reward = lambda f, s, a: self._wm.heads["reward"](f).mean()
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
@@ -74,9 +92,17 @@ class Dreamer(nn.Module):
         )[config.expl_behavior]().to(self._config.device)
 
         self._make_pretrain_opt()
-        self.fill_cache()
+        self.fill_cache()      # Precompute a grid of states for visualization of g(x).
 
     def __call__(self, obs, reset, state=None, training=True):
+        """
+        One Dreamer "step":
+            - If training: run a number of gradient steps and log periodically.
+            - Compute action from current observation via actor in latent space.
+            obs:    dict of obs tensors (batched)
+            reset:  batch of is_first flags
+            state:  latent/action carry-over for recurrent policy
+        """
         step = self._step
         if training:
             steps = (
@@ -105,10 +131,15 @@ class Dreamer(nn.Module):
         return policy_output, state
 
     def _policy(self, obs, state, training):
+        """
+        Encode obs -> latent, then sample or mode action from actor.
+        Handles exploration schedule if not in pure greedy mode.
+        """
         if state is None:
             latent = action = None
         else:
             latent, action = state
+
         obs = self._wm.preprocess(obs)
         embed = self._wm.encoder(obs)
         latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
@@ -136,6 +167,13 @@ class Dreamer(nn.Module):
         return policy_output, state
 
     def _train(self, data):
+        """
+        One training iteration on a batch:
+          - Update world model (encoder, RSSM, heads) via _wm._train
+          - Update behavior via imagined rollouts
+          - (If configured) update exploration behavior
+        Accumulates metrics for periodic logging.
+        """
         metrics = {}
         post, context, mets = self._wm._train(data)
         metrics.update(mets)
@@ -154,6 +192,11 @@ class Dreamer(nn.Module):
                 self._metrics[name].append(value)
 
     def _make_pretrain_opt(self):
+        """
+        Build a single Optimizer wrapper that can take different per-parameter options
+        (e.g., different LR/eps/clip for actor vs. model).
+        Only created if rssm_train_steps>0 or from_ckpt is provided.
+        """
         config = self._config
         use_amp = True if config.precision == 16 else False
         if (
@@ -194,6 +237,7 @@ class Dreamer(nn.Module):
             )
 
     def _update_running_metrics(self, metrics):
+        """Accumulate metrics into self._metrics (used by _maybe_log_metrics)."""
         for name, value in metrics.items():
             if name not in self._metrics.keys():
                 self._metrics[name] = [value]
@@ -201,6 +245,10 @@ class Dreamer(nn.Module):
                 self._metrics[name].append(value)
 
     def _maybe_log_metrics(self, video_pred_log=False):
+        """
+        If it's time to log, average and write metrics (and optional video preds).
+        Also advances the logger step for FPS reporting.
+        """
         if self._logger is not None:
             logged = False
             if self._should_log(self._step):
@@ -219,7 +267,14 @@ class Dreamer(nn.Module):
             if logged:
                 self._logger.write(fps=True)
 
+    # ------------------------ Pretraining helpers ------------------------
+
     def pretrain_model_only(self, data, step=None):
+        """
+        Pretrain only the model (encoder + RSSM + decoder + heads + actor head).
+        Computes KL, reconstruction, margin loss (g(x)), and continuation loss.
+        Applies zeroing warmup for margin/cont for first ~3000 steps.
+        """
         metrics = {}
         wm = self._wm
         actor = self._task_behavior.actor
@@ -316,7 +371,12 @@ class Dreamer(nn.Module):
         self._maybe_log_metrics()
         self._step += 1
         self._logger.step = self._step
+
     def pretrain_regress_obs(self, data, obs_mlp, obs_opt, eval=False):
+        """
+        Probe task: predict privileged state from latent features (MSE).
+        Used to gauge how informative the learned features are.
+        """
         wm = self._wm
         actor = self._task_behavior.actor
         data = wm.preprocess(data)
@@ -337,7 +397,16 @@ class Dreamer(nn.Module):
                 obs_mlp.train()
         return obs_loss.item()
     
+    # ------------------------ Visualization helpers ------------------------
+
     def fill_cache(self):
+        """
+        Precompute a grid over (x, y, theta):
+          - labels (safe/unsafe) based on circle obstacle.
+          - tiny backward step so the heading arrow points 'into' the pixel.
+          - cached rendered images for passing through the model encoder.
+        This is used by get_eval_plot() to visualize g(x) across the grid.
+        """
         print('filling cache')
         nx, ny, nz = 41, 41, 3
         self.nz =nz
@@ -373,8 +442,13 @@ class Dreamer(nn.Module):
         self.theta_lin = thetas[idxs[:,2]]
         self.imgs = imgs
         print('done!')
-    def get_latent(self, thetas, imgs):
 
+    def get_latent(self, thetas, imgs):
+        """
+        Encode a batch of single-step (o_t, a_t=0) to latent features and
+        evaluate g(x) = margin_head(feat).
+        Returns g_x, features, and RSSM posterior.
+        """
         states = np.expand_dims(np.expand_dims(thetas,1),1)
         imgs = np.expand_dims(imgs, 1)
         dummy_acs = np.zeros((np.shape(thetas)[0], 1))
@@ -400,8 +474,12 @@ class Dreamer(nn.Module):
 
         return g_x, feat, post
     
-    
     def get_eval_plot(self):
+        """
+        Evaluate g(x) across the precomputed grid and return:
+          - An RGB plot image summarizing g(x) and its sign.
+          - TP/FN/FP/TN indices w.r.t. the circle ground truth.
+        """
         self.eval()
         v = self.v
         g_x = []
@@ -471,20 +549,25 @@ class Dreamer(nn.Module):
         plot = Image.open(buf).convert("RGB")
         self.train()
         return np.array(plot), tp, fn, fp, tn
-    
 
+# --------------------------- Dataset & training loop ---------------------------
 
 def count_steps(folder):
+    """Count total steps across *.npz episode files (used to set logger.step)."""
     return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
 
-
 def make_dataset(episodes, config):
+    """
+    Build a streaming dataset:
+      - sample_episodes yields fixed-length sequences from the episodes dict
+      - from_generator wraps it as a PyTorch-style iterable with batch size
+    """
     generator = tools.sample_episodes(episodes, config.batch_length)
     dataset = tools.from_generator(generator, config.batch_size)
     return dataset
 
-
 def main(config):
+    """Top-level: load data, build model, pretrain for rssm_train_steps, log metrics/plots."""
     tools.set_seed_everywhere(config.seed)
     if config.deterministic_run:
         tools.enable_deterministic_run()
@@ -566,6 +649,7 @@ def main(config):
         agent._should_pretrain._once = False
 
     def log_plot(title, data):
+        """Serialize a simple line plot to PNG bytes and log as image."""
         buf = BytesIO()
         plt.plot(np.arange(len(data)), data)
         plt.title(title)
@@ -575,7 +659,12 @@ def main(config):
         plot = Image.open(buf).convert("RGB")
         plot_arr = np.array(plot)
         logger.image("pretrain/" + title, np.transpose(plot_arr, (2, 0, 1)))
+
     def eval_obs_recon():
+        """
+        Probe task: regress privileged state from features using a small MLP,
+        alternating train/eval mini-steps to track learning curves.
+        """
         recon_steps = 101
         obs_mlp, obs_opt = agent._wm._init_obs_mlp(config, 3)
         train_loss = []
@@ -598,9 +687,15 @@ def main(config):
         logger.write(step=logger.step)
         del obs_mlp, obs_opt  # dont need to keep these
         return np.min(eval_loss)
+    
     def evaluate(other_dataset=None, eval_prefix=""):
+        """
+        Periodic evaluation:
+          - Optional video pred logs.
+          - Observation regression probe.
+          - Safety margin heatmaps via get_eval_plot().
+        """
         agent.eval()
-        
         eval_policy = functools.partial(agent, training=False)
 
         # For Logging (1 episode)
@@ -618,7 +713,9 @@ def main(config):
 
         agent.train()
         return recon_eval, recon_eval
-    # ==================== Pretrain ====================
+    
+    # ==================== Pretrain loop ====================
+
     total_train_steps = config.rssm_train_steps 
     print(total_train_steps)
     if total_train_steps > 0:
@@ -651,10 +748,10 @@ def main(config):
                     ckpt_name, step, success, best_pretrain_success, agent, logdir
                 )
 
-    
             exp_data = next(expert_dataset)
             agent.pretrain_model_only(exp_data, step)
-    
+
+# --------------------------- CLI & config loading ---------------------------
 
 if __name__ == "__main__":
 
@@ -668,18 +765,24 @@ if __name__ == "__main__":
     )
 
     def recursive_update(base, update):
+        """Shallow + recursive dict merge: update 'base' in-place with 'update'."""
         for key, value in update.items():
             if isinstance(value, dict) and key in base:
                 recursive_update(base[key], value)
             else:
                 base[key] = value
 
+    # Merge 'defaults' then any named blocks passed via --configs
     name_list = ["defaults", *args.configs] if args.configs else ["defaults"]
     defaults = {}
     for name in name_list:
         recursive_update(defaults, configs[name])
+
+    # Expose every config key as a CLI flag (types inferred from defaults via tools.args_type).
     parser = argparse.ArgumentParser()
     for key, value in sorted(defaults.items(), key=lambda x: x[0]):
         arg_type = tools.args_type(value)
         parser.add_argument(f"--{key}", type=arg_type, default=arg_type(value))
+
+    # Kick off training with merged CLI-overridden config.
     main(parser.parse_args(remaining))

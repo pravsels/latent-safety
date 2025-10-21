@@ -6,6 +6,12 @@ matplotlib.use("Agg")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
+import os, argparse
+import matplotlib
+matplotlib.use("Agg")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import io, sys, threading
