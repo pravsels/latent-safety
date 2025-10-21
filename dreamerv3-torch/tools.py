@@ -24,6 +24,38 @@ from typing import Any, Callable, Union
 import wandb
 to_np = lambda x: x.detach().cpu().numpy()
 
+def _iter_trajs_any(dataset_path):
+    """
+    Yield trajectory dicts from:
+      - directory containing traj_*.pkl files
+      - a file that holds a single list of traj dicts
+      - a file that is a pickle stream (many traj pickles concatenated)
+    """
+    p = pathlib.Path(dataset_path)
+    if p.is_dir():
+        for f in sorted(p.glob("traj_*.pkl")):
+            with open(f, "rb") as fh:
+                yield pickle.load(fh)
+        return
+
+    # File case: try to load once; detect list vs item vs stream.
+    with open(p, "rb") as fh:
+        try:
+            first = pickle.load(fh)
+        except EOFError:
+            return
+        if isinstance(first, list):
+            # Old format: one big list of trajs
+            for traj in first:
+                yield traj
+            return
+        # Stream: yield first and keep reading
+        yield first
+        while True:
+            try:
+                yield pickle.load(fh)
+            except EOFError:
+                break
 
 def symlog(x):
     return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
@@ -71,7 +103,10 @@ class Logger:
 
         name = str(logdir).split('/')[-2] + '_' + str(logdir).split('/')[-1]
         # Initialize WandB
-        wandb.init(project="eaishw2", config={"logdir": str(logdir)}, name=name)
+        wandb.init(project="latent_safety", 
+                   entity="pravsels", 
+                   config={"logdir": str(logdir)}, 
+                   name=name)
 
     def config(self, config_dict):
         # Convert PosixPath objects to strings
@@ -198,69 +233,84 @@ def save_checkpoint(
 
 def fill_expert_dataset_dubins(config, cache, is_val_set=False):
     dataset_path = config.dataset_path
-    
-    with open(dataset_path, 'rb') as f:
-        demos = pickle.load(f)
-        
     num_train = config.num_train_trajs
-    
-    
+        
     pixel_keys = sorted(['image'])
     state_keys = sorted(['state'])
 
-    for i, demo in tqdm(
-        enumerate(demos),
-        desc="Loading in expert data",
-        ncols=0,
-        leave=False,
-        total=len(demos),
-    ):
-        # if is_val_set, we don't fill the first num_train_trajs which are used for training
-        if i < num_train and is_val_set:
-            continue
-        elif i >= num_train and not is_val_set:
-            break
-        traj = demo
-        for t in range(len(traj["obs"][pixel_keys[0]])):
+    loaded = 0
+    used_for_train = 0
+    used_for_val = 0
+
+    for i, traj in enumerate(tqdm(_iter_trajs_any(dataset_path), desc="Loading expert data")):
+        loaded += 1
+
+        # Split into train/val by index
+        if is_val_set:
+            if i < num_train:
+                continue
+        else:
+            if i >= num_train:
+                break
+
+        # Build transitions
+        T = len(traj["obs"][pixel_keys[0]])
+        for t in range(T):
             transition = defaultdict(np.array)
+
+            # pixels
             for obs_key in pixel_keys:
                 transition[obs_key] = traj["obs"][obs_key][t]
 
-            if len(state_keys) != 0:
-                curr_obs_state_vec = [
-                    traj["obs"][obs_key][t] for obs_key in state_keys
-                ]
-                transition["state"] = curr_obs_state_vec
-                
-            transition["privileged_state"] = traj['obs']['priv_state'][t]
-            transition["obs_state"] = [np.cos(traj['obs']['state'][t]), np.sin(traj['obs']['state'][t])]
-            transition["reward"] = np.array(
-                0, dtype=np.float32
+            # gt theta state kept under "state" (list with one scalar)
+            if state_keys:
+                transition["state"] = [traj["obs"]["state"][t]]
+
+            # privileged_state is [x, y, theta] as saved by your generator
+            priv = traj["obs"]["priv_state"][t]
+            transition["privileged_state"] = priv
+
+            # observed state fed to Dreamer is cos/sin(theta)
+            th = traj["obs"]["state"][t]
+            transition["obs_state"] = [np.cos(th), np.sin(th)]
+
+            # reward & discount (you set reward 0)
+            transition["reward"] = np.array(0, dtype=np.float32)
+            transition["discount"] = np.array(1, dtype=np.float32)
+
+            # failure = inside obstacle
+            cx, cy, r = config.obs_x, config.obs_y, config.obs_r
+            transition["failure"] = np.array(
+                np.linalg.norm(priv[:2] - np.array([cx, cy])) < r, dtype=np.float32
             )
 
-            # check if state is in obstacle
-            transition["failure"] = np.array(np.linalg.norm(traj['obs']['priv_state'][t][:2] - np.array([config.obs_x, config.obs_y])) < config.obs_r, dtype=np.float32)
+            # episode flags
             transition["is_first"] = np.array(t == 0, dtype=np.bool_)
             transition["is_last"] = np.array(traj["dones"][t], dtype=np.bool_)
             transition["is_terminal"] = np.array(traj["dones"][t], dtype=np.bool_)
-            transition["discount"] = np.array(1, dtype=np.float32)
+
+            # action (float); your convert() will cast dtype anyway
             transition["action"] = np.array(traj["actions"][t], dtype=np.float32)
-            
+
             add_to_cache(cache, f"exp_traj_{i}", transition)
+
+        if is_val_set:
+            used_for_val += 1
+        else:
+            used_for_train += 1
+
     if not is_val_set:
         cprint(
-            f"Loading expert buffer with {config.num_train_trajs} trajectories from {dataset_path}",
+            f"Loading expert buffer with {used_for_train} trajectories from {dataset_path}",
             color="magenta",
             attrs=["bold"],
         )
     else:
         cprint(
-            f"Loading validation buffer with {len(demos) - config.num_train_trajs}",
+            f"Loading validation buffer with {used_for_val} trajectories from {dataset_path}",
             color="magenta",
             attrs=["bold"],
         )
-
-
     return 0
 
 def simulate(
