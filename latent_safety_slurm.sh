@@ -9,6 +9,8 @@
 module purge
 module load brics/apptainer-multi-node
 
+nvidia-smi 
+
 echo "=== GPU/CPU Summary ==="
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-N/A}"
 echo "SLURM_JOB_GPUS: ${SLURM_JOB_GPUS:-N/A}"
