@@ -104,7 +104,7 @@ class Logger:
         name = str(logdir).split('/')[-2] + '_' + str(logdir).split('/')[-1]
         # Initialize WandB
         wandb.init(project="latent_safety", 
-                   entity="pravsels", 
+                   entity="pravsels", mode='offline',
                    config={"logdir": str(logdir)}, 
                    name=name)
 
