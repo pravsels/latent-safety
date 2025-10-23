@@ -1,6 +1,6 @@
 
-# CUDA 12.4 + cuDNN
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+# CUDA 12.6.3 + cuDNN
+FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -25,16 +25,23 @@ RUN set -eux; \
     
 # Prefer PyTorch CUDA 12.4 wheels (to match the base image)
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu124
+    PIP_NO_CACHE_DIR=1 
 
 WORKDIR /workspace
 COPY . .
 
-# install your package
+# Install PyTorch explicitly, then install your package
 RUN set -eux; \
-    sed -i 's/torch==2\.4\.0/torch/' setup.py || true; \
-    python -m pip install wandb && \
-    python -m pip install -e .
+    # Install PyTorch==2.6 explicitly using the cu126 index for arm64 + CUDA 12.6
+    python -m pip install -v torch==2.6 --index-url https://download.pytorch.org/whl/cu126 && \
+    \
+    # Install wandb
+    python -m pip install -v wandb && \
+    \
+    # Remove torch requirement from setup.py
+    sed -i '/torch/d' setup.py || true; \
+    # Install your local package (dependencies except torch)
+    python -m pip install -v -e .
+
 
 CMD ["/bin/bash"]
