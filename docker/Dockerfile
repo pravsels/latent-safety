@@ -34,6 +34,7 @@ COPY . .
 # install your package
 RUN set -eux; \
     sed -i 's/torch==2\.4\.0/torch/' setup.py || true; \
+    python -m pip install wandb && \
     python -m pip install -e .
 
 CMD ["/bin/bash"]
