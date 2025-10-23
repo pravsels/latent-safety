@@ -2,6 +2,7 @@
 
 *.pkl 
 wandb/
+*.out
 
 *.egg-info
 experiment_script/log
