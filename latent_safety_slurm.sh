@@ -19,7 +19,7 @@ echo "CPUs per task: ${SLURM_CPUS_PER_TASK:-N/A}"
 echo "nproc: $(nproc 2>/dev/null || echo N/A)"
 echo
 
-home_dir="/home/pravsels.u5dm"
+home_dir="/home/u5dm/pravsels.u5dm"
 repo="latent_safety"
 repo_dir="${home_dir}/${repo}"
 container="${repo_dir}/container/${repo}.sif"
@@ -29,7 +29,6 @@ start_time="$(date -Is --utc)"
 
 srun --ntasks=1 --gpus-per-task=1 --cpu-bind=cores \
   apptainer exec --nv \
-  --bind "${home_dir}:${home_dir}" \
   --pwd "${repo_dir}" \
   "${container}" \
   ${entrypoint}
