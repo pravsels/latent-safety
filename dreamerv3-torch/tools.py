@@ -290,7 +290,8 @@ def fill_expert_dataset_dubins(config, cache, is_val_set=False):
             transition["is_terminal"] = np.array(traj["dones"][t], dtype=np.bool_)
 
             # action (float); your convert() will cast dtype anyway
-            transition["action"] = np.array(traj["actions"][t], dtype=np.float32)
+            act = np.asarray(traj["actions"][t], dtype=np.float32)
+            transition["action"] = np.atleast_1d(act)
 
             add_to_cache(cache, f"exp_traj_{i}", transition)
 
