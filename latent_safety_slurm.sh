@@ -23,7 +23,7 @@ home_dir="/home/u5dm/pravsels.u5dm"
 repo="latent_safety"
 repo_dir="${home_dir}/${repo}"
 container="${repo_dir}/container/${repo}.sif"
-entrypoint="python scripts/dreamer_offline.py"
+entrypoint="python scripts/dreamer_inference.py --logdir logs/dreamer_dubins --checkpoint rssm_ckpt.pt"
 
 start_time="$(date -Is --utc)"
 
