@@ -122,8 +122,13 @@ def rollout_open_loop(agent, config, x, y, theta, horizon=50, action_value=0.0):
     # 2) Imagine for horizon-1 steps with constant action
     T_imag = max(0, int(horizon) - 1)
     if T_imag > 0:
-        actions = np.full((1, T_imag, 1), float(action_value), dtype=np.float32)
-        actions = torch.tensor(actions, device=config.device, dtype=torch.float32)
+        # time-first: [T, B=1, action_dim=1]
+        actions = torch.full(
+            (T_imag, 1, 1),
+            float(action_value),
+            device=config.device,
+            dtype=torch.float32,
+        )
 
         use_amp = bool(getattr(agent._wm, "_use_amp", False) and torch.cuda.is_available())
         with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
