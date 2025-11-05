@@ -212,8 +212,13 @@ def main():
         ckpt_stem = pathlib.Path(args.checkpoint).stem
         name = human_name(ckpt_stem, x, y, th, args.horizon, act, args.fps)
         out_gif = pathlib.Path(args.out_gif) if args.out_gif else (output_dir / name)
+
+        print(f"[debug] vid shape={vid.shape}  (expect T={args.horizon})")
         imageio.mimsave(out_gif, list(vid), fps=args.fps)
         print(f"Saved rollout video to {out_gif}")
+        mp4_path = out_gif.with_suffix('.mp4')
+        imageio.mimsave(mp4_path, list(vid), fps=args.fps)
+        print(f"Saved rollout video to {mp4_path}")
 
 
 if __name__ == '__main__':
