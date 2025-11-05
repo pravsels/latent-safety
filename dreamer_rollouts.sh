@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -47,7 +48,6 @@ for start in "${STARTS[@]}"; do
         --action "${action}" \
         --horizon "${T}" \
         --fps "${FPS}"
-      # Note: GIF filename is auto-humanized by your script (no --out_gif needed).
     done
   done
 done
