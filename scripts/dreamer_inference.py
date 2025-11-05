@@ -98,38 +98,52 @@ def rollout_open_loop(agent, config, x, y, theta, horizon=50, action_value=0.0):
     - action_value: constant turn rate to feed (in [-turnRate, turnRate])
     Returns: np.uint8 video array of shape (T, H, W, C)
     """
-    # First image (H,W,3) uint8 from your renderer
+    # 1) One real frame to get the posterior at t=0
     img0 = get_frame(torch.tensor([x, y, theta]), config).astype(np.uint8)
-
-    # Build a single-episode sequence (length = horizon)
-    T = int(horizon)
     H, W = img0.shape[:2]
-    images = np.zeros((T, H, W, 3), dtype=np.uint8)
-    images[0] = img0
 
-    obs_state = np.zeros((T, 2), dtype=np.float32)
-    obs_state[0] = [np.cos(theta), np.sin(theta)]
+    images   = np.zeros((1, 1, H, W, 3), dtype=np.uint8)  # [B=1, T=1, H, W, C]
+    images[0, 0] = img0
+    obs_state = np.array([[[np.cos(theta), np.sin(theta)]]], dtype=np.float32)  # [1,1,2]
+    actions0  = np.zeros((1, 1, 1), dtype=np.float32)       # dummy a_0
+    is_first  = np.array([[[1.0]]], dtype=np.float32)
+    is_term   = np.array([[[0.0]]], dtype=np.float32)
 
-    actions = np.full((T, 1), float(action_value), dtype=np.float32)
-    is_first = np.zeros((T, 1), dtype=np.float32); is_first[0] = 1.0
-    is_term  = np.zeros((T, 1), dtype=np.float32)
-
-    data = {
-        "image": images[None],         # [B=1, T, H, W, C]
-        "obs_state": obs_state[None],  # [1, T, 2]
-        "action": actions[None],       # [1, T, 1]
-        "is_first": is_first[None],    # [1, T, 1]
-        "is_terminal": is_term[None],  # [1, T, 1]
+    data0 = {
+        "image": images, "obs_state": obs_state, "action": actions0,
+        "is_first": is_first, "is_terminal": is_term,
     }
+    data0 = agent._wm.preprocess(data0)
+    embed0 = agent._wm.encoder(data0)
+    # posterior for the single observed step
+    post0, _ = agent._wm.dynamics.observe(embed0, data0["action"], data0["is_first"])
+    init = {k: v[:, -1] for k, v in post0.items()}  # last=only step
 
-    # World model expects its preprocess’d format
-    data = agent._wm.preprocess(data)
+    # 2) Imagine for horizon-1 steps with constant action
+    T_imag = max(0, int(horizon) - 1)
+    if T_imag > 0:
+        actions = np.full((1, T_imag, 1), float(action_value), dtype=np.float32)
+        actions = torch.tensor(actions, device=config.device, dtype=torch.float32)
 
-    # Predict video; returns float in [0,1] or [-0,1] depending on decoder
-    with torch.no_grad(), torch.amp.autocast("cuda", enabled=getattr(agent._wm, "_use_amp", False)):
-        vid = agent._wm.video_pred(data)  # shape [B, T, H, W, C] or [T, H, W, C]
-    vid = vid[0] if vid.ndim == 5 else vid  # strip batch if present
-    vid = np.clip(vid, 0, 1) if vid.max() <= 1.5 else np.clip((vid+1)/2, 0, 1)
+        use_amp = bool(getattr(agent._wm, "_use_amp", False) and torch.cuda.is_available())
+        with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
+            prior = agent._wm.dynamics.imagine_with_action(actions, init)   # dict of states [T_imag, B, ...]
+            feat  = agent._wm.dynamics.get_feat(prior)                      # [T_imag, B, feat]
+            pred  = agent._wm.heads["decoder"](feat)["image"].mode()        # [T_imag, B, H, W, C]
+    else:
+        pred = torch.empty((0, 1, H, W, 3), device=config.device)
+
+    # 3) Also decode the observed frame (reconstruction of t=0) for the first frame
+    with torch.no_grad():
+        recon0 = agent._wm.heads["decoder"](agent._wm.dynamics.get_feat(post0))["image"].mode()  # [B=1, T=1, H,W,C]
+        recon0 = recon0[:, -1]  # [B=1, H,W,C]
+
+    # 4) Assemble [t=0 recon] + [imagined frames]
+    vid = torch.cat([recon0, pred[:, 0]], dim=0)  # [T, H, W, C], T=horizon
+
+    # 5) To numpy uint8 in [0,255]
+    vid = vid.detach().cpu().float().numpy()
+    vid = np.clip(vid, 0.0, 1.0)
     vid = (vid * 255).astype(np.uint8)
 
     return vid
@@ -149,6 +163,11 @@ def main():
 
     args = parser.parse_args()
     
+    if args.horizon < 1:
+        raise ValueError("--horizon must be ≥ 1")
+
+    torch.manual_seed(0); np.random.seed(0)
+
     logdir = pathlib.Path(args.logdir)
     
     # Load config from original training run
