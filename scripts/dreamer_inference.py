@@ -30,6 +30,7 @@ from generate_data_traj_cont import get_frame
 import imageio.v2 as imageio
 from dreamer_offline import Dreamer, make_dataset
 import gym
+from PIL import Image, ImageDraw, ImageFont
 
 class NullLogger:
     def __init__(self, logdir, step=0): self.step = step
@@ -51,6 +52,25 @@ def human_name(ckpt_stem, x, y, theta, horizon, action, fps):
         f"action={action:+.2f} ({turn}) - horizon={int(horizon)} steps - "
         f"fps={fps} - ckpt={ckpt_stem} - {date_str} {time_str}.gif"
     )
+
+def add_action_text(frame, action_value):
+    """Add action text overlay to frame."""
+    img = Image.fromarray(frame)
+    draw = ImageDraw.Draw(img)
+    
+    if abs(action_value) < 1e-6:
+        turn = "STRAIGHT"
+        color = (0, 255, 0)  # green
+    elif action_value > 0:
+        turn = f"LEFT {action_value:+.2f}"
+        color = (255, 0, 0)  # red
+    else:
+        turn = f"RIGHT {action_value:+.2f}"
+        color = (0, 0, 255)  # blue
+    
+    draw.text((10, 10), turn, fill=color)
+
+    return np.array(img)
 
 def load_dreamer(config, checkpoint_path):
     """Load trained Dreamer agent from checkpoint."""
@@ -124,7 +144,7 @@ def rollout_open_loop(agent, config, x, y, theta, horizon=50, action_value=0.0):
     if T_imag > 0:
         # time-first: [T, B=1, action_dim=1]
         actions = torch.full(
-            (T_imag, 1, 1),
+            (1, T_imag, 1),
             float(action_value),
             device=config.device,
             dtype=torch.float32,
@@ -133,8 +153,12 @@ def rollout_open_loop(agent, config, x, y, theta, horizon=50, action_value=0.0):
         use_amp = bool(getattr(agent._wm, "_use_amp", False) and torch.cuda.is_available())
         with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
             prior = agent._wm.dynamics.imagine_with_action(actions, init)   # dict of states [T_imag, B, ...]
+            print(f"[debug] prior keys: {prior.keys()}")
+            print(f"[debug] prior['deter'].shape: {prior['deter'].shape}")
             feat  = agent._wm.dynamics.get_feat(prior)                      # [T_imag, B, feat]
+            print(f"[debug] feat.shape: {feat.shape}")
             pred  = agent._wm.heads["decoder"](feat)["image"].mode()        # [T_imag, B, H, W, C]
+            print(f"[debug] pred.shape: {pred.shape}")
     else:
         pred = torch.empty((0, 1, H, W, 3), device=config.device)
 
@@ -144,12 +168,15 @@ def rollout_open_loop(agent, config, x, y, theta, horizon=50, action_value=0.0):
         recon0 = recon0[:, -1]  # [B=1, H,W,C]
 
     # 4) Assemble [t=0 recon] + [imagined frames]
-    vid = torch.cat([recon0, pred[:, 0]], dim=0)  # [T, H, W, C], T=horizon
+    vid = torch.cat([recon0, pred[0, :]], dim=0)  # [T, H, W, C], T=horizon
 
     # 5) To numpy uint8 in [0,255]
     vid = vid.detach().cpu().float().numpy()
     vid = np.clip(vid, 0.0, 1.0)
     vid = (vid * 255).astype(np.uint8)
+
+    for i in range(len(vid)):
+        vid[i] = add_action_text(vid[i], action_value)
 
     return vid
 
@@ -157,7 +184,7 @@ def rollout_open_loop(agent, config, x, y, theta, horizon=50, action_value=0.0):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--logdir', type=str, required=True)
-    parser.add_argument('--checkpoint', type=str, default='latest.pt')
+    parser.add_argument('--checkpoint', type=str, default='rssm_ckpt.pt')
     parser.add_argument('--output_dir', type=str, default=None)
     parser.add_argument('--out_gif', type=str, default=None)
     parser.add_argument('--rollout', type=str, default=None, help='x,y,theta (e.g. "0.8,0.0,1.57")')
@@ -214,6 +241,10 @@ def main():
         #  clamp action to valid range 
         act = max(-config.turnRate, min(config.turnRate, args.action))
         vid = rollout_open_loop(agent, config, x, y, th, horizon=args.horizon, action_value=act)
+        print(f"[debug] vid shape={vid.shape}, dtype={vid.dtype}")
+        print(f"[debug] vid min={vid.min()}, max={vid.max()}")
+        print(f"[debug] first frame shape: {vid[0].shape}")
+
         ckpt_stem = pathlib.Path(args.checkpoint).stem
         name = human_name(ckpt_stem, x, y, th, args.horizon, act, args.fps)
         out_gif = pathlib.Path(args.out_gif) if args.out_gif else (output_dir / name)
