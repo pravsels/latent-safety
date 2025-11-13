@@ -411,7 +411,7 @@ for iter in range(warmup+args.total_episodes):
             os.makedirs(log_path+"/total_epochs_{}".format(epoch))
         writer = SummaryWriter(log_path+"/total_epochs_{}".format(epoch)) #filename_suffix="_"+timestr+"_epoch_id_{}".format(epoch))
     if logger is None:
-        logger = WandbLogger()
+        logger = WandbLogger(entity="pravsels")
         logger.load(writer)
     logger = TensorboardLogger(writer)
     

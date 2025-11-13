@@ -65,6 +65,7 @@ class WandbLogger(BaseLogger):
 
         self.wandb_run = wandb.init(
             project=project,
+            mode='offline',
             name=name,
             id=run_id,
             resume="allow",
