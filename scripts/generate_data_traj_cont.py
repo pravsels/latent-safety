@@ -59,16 +59,38 @@ def get_frame(states, config):
 
   # Draw a blue velocity arrow of length v * dt pointing along heading theta.
   # Note: quiver params tuned for tiny canvas; avoid unsupported kwargs.
-  plt.quiver(
-    states[0], states[1], 
-    dt * v * torch.cos(states[2]), 
-    dt * v * torch.sin(states[2]), 
-    angles='xy', scale_units='xy', width=0.1, scale=0.18, 
-    color=(0, 0, 1), zorder=3
+  # plt.quiver(
+  #   states[0], states[1], 
+  #   dt * v * torch.cos(states[2]), 
+  #   dt * v * torch.sin(states[2]), 
+  #   angles='xy', scale_units='xy', width=0.1, scale=0.18, 
+  #   color=(0, 0, 1), zorder=3
+  # )
+
+    # Draw a blue arrow for the car heading.
+  x = float(states[0])
+  y = float(states[1])
+  th = float(states[2])
+
+  dx = float(dt * v * torch.cos(states[2]))
+  dy = float(dt * v * torch.sin(states[2]))
+
+  arena = max(config.x_max - config.x_min, config.y_max - config.y_min)
+  head_w = 0.06 * arena
+  head_l = 0.07 * arena
+
+  ax.arrow(
+      x, y,
+      dx, dy,
+      head_width=head_w,
+      head_length=head_l,
+      length_includes_head=True,
+      color=(0, 0, 1),
+      zorder=3,
   )
 
   # Draw the agent position as a blue dot.
-  plt.scatter(states[0], states[1], s=20, color=(0, 0, 1), zorder=3)
+  # plt.scatter(states[0], states[1], s=20, color=(0, 0, 1), zorder=3)
   plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
   # Rasterize figure to an in-memory PNG and decode to an RGB array.
