@@ -3,7 +3,7 @@ Minimal script to visualize trained world model.
 Uses existing methods from dreamer_offline.py - just loads checkpoint and calls them.
 
 Usage:
-    python scripts/dreamer_inference.py --logdir logs/dreamer_dubins --checkpoint rssm_ckpt.pt
+    python scripts/dreamer_inference.py --logdir logs/dreamer_dubins --rollout 1.0,0.0,1.5708 --action 1.25 --horizon 50
 """
 
 import argparse
@@ -53,22 +53,32 @@ def human_name(ckpt_stem, x, y, theta, horizon, action, fps):
         f"fps={fps} - ckpt={ckpt_stem} - {date_str} {time_str}.gif"
     )
 
-def add_action_text(frame, action_value):
+def add_action_text(frame, action_value, label=None):
     """Add action text overlay to frame."""
     img = Image.fromarray(frame)
     draw = ImageDraw.Draw(img)
+
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 7)
+    except:
+        font = ImageFont.load_default()
     
+    # Action text - always red
     if abs(action_value) < 1e-6:
         turn = "STRAIGHT"
-        color = (0, 255, 0)  # green
     elif action_value > 0:
         turn = f"LEFT {action_value:+.2f}"
-        color = (255, 0, 0)  # red
     else:
         turn = f"RIGHT {action_value:+.2f}"
-        color = (0, 0, 255)  # blue
     
-    draw.text((10, 10), turn, fill=color)
+    draw.text((5, 5), turn, fill=(255, 0, 0), font=font)
+
+    # Label text, positioned on right
+    if label:
+        bbox = draw.textbbox((0, 0), label, font=font)
+        text_width = bbox[2] - bbox[0]
+        x_pos = img.width - text_width - 5
+        draw.text((x_pos, 5), label, fill=(0, 255, 0), font=font)
 
     return np.array(img)
 
@@ -176,9 +186,41 @@ def rollout_open_loop(agent, config, x, y, theta, horizon=50, action_value=0.0):
     vid = (vid * 255).astype(np.uint8)
 
     for i in range(len(vid)):
-        vid[i] = add_action_text(vid[i], action_value)
+        vid[i] = add_action_text(vid[i], action_value, label="World Model")
 
     return vid
+
+def rollout_with_comparison(agent, config, x, y, theta, horizon, action_value):
+    """
+    Side-by-side comparison: WM imagination vs ground truth.
+    Returns: np.uint8 array of shape (T, H, W*2, C) with WM on left, GT on right.
+    """
+    # Get WM imagination
+    wm_frames = rollout_open_loop(agent, config, x, y, theta, horizon, action_value)
+    
+    # Ground truth rollout using analytical dynamics
+    gt_frames = []
+    curr_x, curr_y, curr_theta = x, y, theta
+    
+    for t in range(horizon):
+        # Render current state
+        frame = get_frame(torch.tensor([curr_x, curr_y, curr_theta]), config)
+        gt_frame = frame.astype(np.uint8)
+        # Add text overlay
+        gt_frame = add_action_text(gt_frame, action_value, label="Analytic GT")
+        gt_frames.append(gt_frame)
+        
+        # Update state using analytical Dubins dynamics
+        curr_x += config.dt * config.speed * np.cos(curr_theta)
+        curr_y += config.dt * config.speed * np.sin(curr_theta)
+        curr_theta += config.dt * action_value
+    
+    gt_frames = np.array(gt_frames)
+    
+    # Concatenate horizontally: [WM | GT]
+    combined = np.concatenate([wm_frames, gt_frames], axis=2)  # axis=2 is width
+
+    return combined
 
 
 def main():
@@ -240,10 +282,7 @@ def main():
         x, y, th = map(float, args.rollout.split(','))
         #  clamp action to valid range 
         act = max(-config.turnRate, min(config.turnRate, args.action))
-        vid = rollout_open_loop(agent, config, x, y, th, horizon=args.horizon, action_value=act)
-        print(f"[debug] vid shape={vid.shape}, dtype={vid.dtype}")
-        print(f"[debug] vid min={vid.min()}, max={vid.max()}")
-        print(f"[debug] first frame shape: {vid[0].shape}")
+        vid = rollout_with_comparison(agent, config, x, y, th, horizon=args.horizon, action_value=act)
 
         ckpt_stem = pathlib.Path(args.checkpoint).stem
         name = human_name(ckpt_stem, x, y, th, args.horizon, act, args.fps)
