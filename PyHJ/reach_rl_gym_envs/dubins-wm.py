@@ -9,6 +9,7 @@ from PIL import Image
 import matplotlib.patches as patches
 import torch
 import math
+
 class Dubins_WM_Env(gym.Env):
     # TODO: 1. baseline over approximation; 2. our critic loss drop faster 
     def __init__(self, params):
@@ -79,12 +80,18 @@ class Dubins_WM_Env(gym.Env):
         truncated = False
         info = {"is_first":False, "is_terminal":terminated}
         return np.copy(self.feat), rew, terminated, truncated, info
-    
+
     def reset(self, initial_state=None,seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
-       
-        
-        init_traj = next(self.data)
+        custom_init = None
+        if options is not None:
+            custom_init = options.get("custom_init")
+
+        if custom_init is not None:
+            init_traj = custom_init
+        else:
+            init_traj = next(self.data)
+
         data = self.wm.preprocess(init_traj)
         embed = self.encoder(data)
         self.latent, _ = self.wm.dynamics.observe(
@@ -94,7 +101,10 @@ class Dubins_WM_Env(gym.Env):
         for k, v in self.latent.items(): 
             self.latent[k] = v[:, [-1]]
         self.feat = self.wm.dynamics.get_feat(self.latent).detach().cpu().numpy() 
-        return np.copy(self.feat), {"is_first": True, "is_terminal": False}
+        info = {"is_first": True, "is_terminal": False}
+        if custom_init is not None:
+            info["custom_init"] = True
+        return np.copy(self.feat), info
       
 
     def safety_margin(self, state):
