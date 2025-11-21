@@ -5,6 +5,10 @@ wandb/
 logs/
 *.out
 
+evaluation_videos/
+uncapped_videos/
+*.png 
+
 *.egg-info
 experiment_script/log
 **/__pycache__/
