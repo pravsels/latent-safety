@@ -12,6 +12,8 @@ logs/
 *.pkl 
 *.json
 
+*_videos/
+
 **/__pycache__/
 LCRL/policy/__pycache__/
 experiment_script/visualization/log/
