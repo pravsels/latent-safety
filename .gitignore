@@ -2,6 +2,16 @@
 experiment_script/log
 **/__pycache__/
 
+checkpoints/
+*.png
+wandb/
+*.h5
+
+logs/
+*.out
+*.pkl 
+*.json
+
 **/__pycache__/
 LCRL/policy/__pycache__/
 experiment_script/visualization/log/

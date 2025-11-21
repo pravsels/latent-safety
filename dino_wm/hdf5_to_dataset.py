@@ -1,18 +1,24 @@
-import os
-import h5py
-import numpy as np
-import torch
-from torchvision import transforms
+"""
+Preprocess per-trajectory HDF5 files and build the consolidated DINO-WM dataset.
+
+Quickstart (from repo root):
+  cd dino_wm
+  python dino_wm/hdf5_to_dataset.py \
+    --input-dir /data/ken/latent-labeled/ \
+    --output /data/ken/latent-labeled/consolidated.h5
+"""
 
 import os
+
 import h5py
-import torch
 import numpy as np
-from tqdm import tqdm
+import torch
 from PIL import Image
+from scipy.spatial.transform import Rotation as R
 from torchvision import transforms
 import torchvision.transforms.functional as F
-from scipy.spatial.transform import Rotation as R
+from tqdm import tqdm
+
 # Image transforms
 
 def crop_top_middle(image):
@@ -81,12 +87,14 @@ def eef_pose_to_state(T, gripper):
     return eef_state
 
 
-def preprocess(demo_path):
+def preprocess(demo_path: str, device: str = "cuda:0"):
     # Load DINO model
-    dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg').to('cuda:0')
+    dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14_reg").to(device)
 
     # Path to HDF5 files
-    hdf5_files = [os.path.join(demo_path, f) for f in os.listdir(demo_path) if f.endswith('.hdf5')]
+    hdf5_files = [
+        os.path.join(demo_path, f) for f in os.listdir(demo_path) if f.endswith(".hdf5")
+    ]
 
     pixel_keys = ["rs", "zed_right"]
 
@@ -113,8 +121,8 @@ def preprocess(demo_path):
                 if "cam_rs_embd" not in data_group:
                     # Wrist (rs) image
                     rs_img = cam_rs[t]
-                    img_PIL = Image.fromarray(np.uint8(rs_img)).convert('RGB')
-                    img_tensor = DINO_transform(img_PIL).to('cuda:0')
+                    img_PIL = Image.fromarray(np.uint8(rs_img)).convert("RGB")
+                    img_tensor = DINO_transform(img_PIL).to(device)
                     with torch.no_grad():
                         patch_emb = dino.forward_features(img_tensor.unsqueeze(0))['x_norm_patchtokens'].squeeze().cpu().numpy()
                     cam_rs_embds.append(patch_emb)
@@ -122,8 +130,8 @@ def preprocess(demo_path):
                 if "cam_zed_embd" not in data_group:
                     # Zed front image
                     zed_img = cam_zed[t]
-                    img_PIL = Image.fromarray(np.uint8(zed_img)).convert('RGB')
-                    img_tensor = DINO_crop(img_PIL).to('cuda:0')
+                    img_PIL = Image.fromarray(np.uint8(zed_img)).convert("RGB")
+                    img_tensor = DINO_crop(img_PIL).to(device)
                     with torch.no_grad():
                         patch_emb = dino.forward_features(img_tensor.unsqueeze(0))['x_norm_patchtokens'].squeeze().cpu().numpy()
                     cam_zed_embds.append(patch_emb)
@@ -145,12 +153,12 @@ def preprocess(demo_path):
 
     # Final summary
     all_acs = np.array(all_acs)
-    print('max', np.max(all_acs, axis=0))
-    print('min', np.min(all_acs, axis=0))
-    print('total transitions:', transitions)
+    print("max", np.max(all_acs, axis=0))
+    print("min", np.min(all_acs, axis=0))
+    print("total transitions:", transitions)
 
 
-def convert_hdf5_to_consolidated_hdf5(hdf5_dir, output_hdf5_file):
+def convert_hdf5_to_consolidated_hdf5(hdf5_dir: str, output_hdf5_file: str):
     """
     Convert all individual HDF5 trajectory files in a directory into a single HDF5 file.
     
@@ -191,8 +199,38 @@ def convert_hdf5_to_consolidated_hdf5(hdf5_dir, output_hdf5_file):
 
                 print(f"Copied {hdf5_file} → trajectory_{i}")
 
-if __name__ == '__main__':
-    hdf5_dir = "/data/ken/latent-labeled"
-    output_hdf5_file = "/data/ken/latent-labeled/consolidated.h5"
-    preprocess(hdf5_dir)
-    convert_hdf5_to_consolidated_hdf5(hdf5_dir, output_hdf5_file)
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--input-dir",
+        type=str,
+        required=True,
+        help="Directory containing per-trajectory .hdf5 files.",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        required=True,
+        help="Path to consolidated output HDF5 file.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda:0",
+        help="Device for DINO inference (e.g. 'cuda:0' or 'cpu').",
+    )
+    parser.add_argument(
+        "--skip-preprocess",
+        action="store_true",
+        help="Skip embedding/state preprocessing and only consolidate existing files.",
+    )
+    args = parser.parse_args()
+
+    if not args.skip_preprocess:
+        preprocess(args.input_dir, device=args.device)
+    convert_hdf5_to_consolidated_hdf5(args.input_dir, args.output)
+
+    
