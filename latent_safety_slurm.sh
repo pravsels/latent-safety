@@ -22,7 +22,7 @@ echo
 home_dir="/home/u5dm/pravsels.u5dm"
 repo="latent_safety"
 repo_dir="${home_dir}/${repo}"
-container="${repo_dir}/container/${repo}.sif"
+container="${repo_dir}/container/${repo}_arm64.sif"
 entrypoint="python dino_wm/train_dino_decoder.py --hdf5-file test_v2.h5 --batch-size 64"
 
 start_time="$(date -Is --utc)"
