@@ -20,18 +20,21 @@ echo "nproc: $(nproc 2>/dev/null || echo N/A)"
 echo
 
 home_dir="/home/u5dm/pravsels.u5dm"
+scratch_dir="/scratch/u5dm/pravsels.u5dm"
 repo="latent_safety"
 repo_dir="${home_dir}/${repo}"
+data_dir="${scratch_dir}/${repo}"
 container="${repo_dir}/container/${repo}_arm64.sif"
-entrypoint="python dino_wm/train_dino_decoder.py --hdf5-file arx5_subset_train.h5 --batch-size 128"
+entrypoint="python dino_wm/train_dino_decoder.py --hdf5-file ${data_dir}/arx5_subset_train.h5 --batch-size 128"
 
 start_time="$(date -Is --utc)"
 
 srun --ntasks=1 --gpus-per-task=1 --cpu-bind=cores \
-  apptainer exec --nv \
-  --pwd "${repo_dir}" \
-  "${container}" \
-  ${entrypoint}
+apptainer exec --nv \
+          --pwd "${repo_dir}" \
+          --bind "${scratch_dir}:${scratch_dir}" \
+          "${container}" \
+          ${entrypoint}
 
 end_time="$(date -Is --utc)"
 
