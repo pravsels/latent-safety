@@ -3,7 +3,7 @@
 Test the trained DINO decoder by visualizing reconstructions.
 
 Usage:
-  python scripts/test_dino_decoder.py
+  python dino_wm/test_dino_decoder.py
 """
 
 import h5py
