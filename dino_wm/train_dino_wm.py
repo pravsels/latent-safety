@@ -87,8 +87,8 @@ def main():
     parser.add_argument(
         "--decoder-checkpoint",
         type=str,
-        default="checkpoints/testing_decoder.pth",
-        help="Path to decoder checkpoint (default: checkpoints/testing_decoder.pth).",
+        default="dino_decoder_checkpoints/testing_decoder.pth",
+        help="Path to decoder checkpoint (default: dino_decoder_checkpoints/testing_decoder.pth).",
     )
     parser.add_argument(
         "--state-dim",
@@ -156,6 +156,12 @@ def main():
         type=int,
         default=0,
         help="Random seed (default: 0).",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="dino_wm_checkpoints",
+        help="Directory to save checkpoints (default: dino_wm_checkpoints).",
     )
     args = parser.parse_args()
 
@@ -397,18 +403,18 @@ def main():
             print()
             print(f"\rIter {i}, Eval Loss: {loss.item():.4f}, front Loss: {im1_loss.item():.4f}, wrist Loss: {im2_loss.item():.4f}, state Loss: {state_loss.item():.4f}")
 
-            os.makedirs("checkpoints", exist_ok=True)
-            torch.save(transition.state_dict(), f'checkpoints/wm_iter{i}.pth')
+            os.makedirs(args.checkpoint_dir, exist_ok=True)
+            torch.save(transition.state_dict(), os.path.join(args.checkpoint_dir, f'wm_iter{i}.pth'))
 
             if loss < best_eval:
                 best_eval = loss
-                torch.save(transition.state_dict(), 'checkpoints/best_wm.pth')
+                torch.save(transition.state_dict(), os.path.join(args.checkpoint_dir, 'best_wm.pth'))
             
             transition.train()
             wandb.log({'eval_loss': loss.item(), 'front_loss': im1_loss.item(), 'wrist_loss': im2_loss.item(), 'state_loss': state_loss.item(), 'pred_front': wandb.Image(pred_im1), 'pred_wrist': wandb.Image(pred_im2), 'front': wandb.Image(im1), 'wrist': wandb.Image(im2)})
 
     plt.legend()
-    plt.savefig('training_curve.png')
+    plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
 
 
 if __name__ == "__main__":

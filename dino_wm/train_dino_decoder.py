@@ -65,9 +65,46 @@ def main():
         default=5000,
         help="Number of training iterations (default: 5000).",
     )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="dino_decoder_checkpoints",
+        help="Directory to save checkpoints (default: dino_decoder_checkpoints).",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        type=str,
+        default="offline",
+        choices=["online", "offline", "disabled"],
+        help="Wandb logging mode (default: offline).",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="dino-WM",
+        help="Wandb project name (default: dino-WM).",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default="pravsels",
+        help="Wandb entity/team name (default: pravsels).",
+    )
+    parser.add_argument(
+        "--wandb-name",
+        type=str,
+        default="Decoder",
+        help="Wandb run name (default: Decoder).",
+    )
     args = parser.parse_args()
 
-    wandb.init(project="dino-WM", name="Decoder", entity="pravsels", mode="offline")
+    wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_name,
+        entity=args.wandb_entity,
+        mode=args.wandb_mode,
+        config=vars(args)
+    )
 
     hdf5_file = args.hdf5_file
     H = 1
@@ -240,8 +277,8 @@ def main():
             print(f"\rIter {i}, Eval Loss: {loss.item():.4f}")
             if loss < best_eval:
                 best_eval = loss
-                os.makedirs("checkpoints", exist_ok=True)
-                torch.save(decoder.state_dict(), 'checkpoints/testing_decoder.pth')
+                os.makedirs(args.checkpoint_dir, exist_ok=True)
+                torch.save(decoder.state_dict(), os.path.join(args.checkpoint_dir, 'testing_decoder.pth'))
             decoder.train()
             
             out_log = (output1_bhwc[0].detach().cpu().numpy())
@@ -256,7 +293,8 @@ def main():
     plt.plot(iters, train_losses, label='train')
     plt.plot(iters, eval_losses, label='eval')
     plt.legend()
-    plt.savefig('training curve.png')
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
 
 
 if __name__ == "__main__":
