@@ -2,10 +2,15 @@
 """
 Script to filter Hugging Face datasets by robot_type.
 
-For "arx5", directly checks camera data to ensure single-arm setup:
-- Has observation.images.front
-- Has observation.images.wrist
-- Does NOT have observation.images.left_wrist or observation.images.right_wrist
+Filters:
+- Only v2.1+ format datasets (rejects v2.0 and v1.6 formats)
+  - v2.1+ has per-episode stats (meta/episodes_stats.jsonl)
+  - v2.0 has global stats only (rejected)
+  - v1.6 uses old format (rejected)
+- For "arx5", checks camera data to ensure single-arm setup:
+  - Has observation.images.front
+  - Has observation.images.wrist
+  - Does NOT have observation.images.left_wrist or observation.images.right_wrist
 
 Sample Usage:
     # Test a single dataset
@@ -32,9 +37,47 @@ def _is_single_arm_arx5(has_front: bool, has_wrist: bool, has_left_wrist: bool, 
     return False
 
 
+def _check_dataset_version(siblings: List[str], verbose: bool = False) -> bool:
+    """
+    Check if dataset is in v2.1+ format (not v2.0 or v1.6).
+    
+    Key difference between v2.0 and v2.1:
+    - v2.1+ has meta/episodes_stats.jsonl (per-episode stats)
+    - v2.0 has meta/stats.json (global stats) but NO episodes_stats.jsonl
+    
+    v2.1+ datasets:
+    - Have data/chunk-*/episode_*.parquet 
+    - Have meta/episodes_stats.jsonl (per-episode stats)
+    
+    v2.0 datasets (REJECTED):
+    - Have data/chunk-*/episode_*.parquet
+    - Have meta/stats.json but NOT meta/episodes_stats.jsonl
+    
+    v1.6 datasets (REJECTED):
+    - Have data/train-*.parquet
+    - Use meta_data/ directory
+    """
+    # Check for v2.1+ indicator: per-episode stats
+    has_chunk_episodes = any('data/chunk-' in s and 'episode_' in s and '.parquet' in s for s in siblings)
+    has_episodes_stats = any('meta/episodes_stats.jsonl' in s for s in siblings)
+    
+    # Check for v1.6 indicators
+    has_meta_data_dir = any(s.startswith('meta_data/') for s in siblings)
+    
+    # v2.1+ MUST have episodes_stats.jsonl
+    is_v21_plus = has_chunk_episodes and has_episodes_stats and not has_meta_data_dir
+    
+    if verbose:
+        print(f"    Version check: chunk_episodes={has_chunk_episodes}, episodes_stats.jsonl={has_episodes_stats}, v2.1+={is_v21_plus}")
+    
+    return is_v21_plus
+
+
 def check_robot_type(dataset_id: str, target_robot_type: str = "arx5", verbose: bool = False) -> bool:
     """
     Check if dataset matches target robot_type by checking repo file structure.
+    
+    Filters out v2.0 and v1.6 datasets (only accepts v2.1+).
     
     Args:
         dataset_id: Full dataset ID (e.g., "villekuosmanen/dataset_name")
@@ -42,7 +85,7 @@ def check_robot_type(dataset_id: str, target_robot_type: str = "arx5", verbose: 
         verbose: Whether to print debug information
         
     Returns:
-        True if robot_type matches and is single-arm (for arx5), False otherwise
+        True if robot_type matches and is single-arm (for arx5) and is v2.1+, False otherwise
     """
     target_lower = target_robot_type.lower()
     
@@ -57,6 +100,13 @@ def check_robot_type(dataset_id: str, target_robot_type: str = "arx5", verbose: 
             return False
         
         siblings = [s.rfilename for s in dataset_info.siblings]
+        
+        # Check version first
+        is_v21_plus = _check_dataset_version(siblings, verbose)
+        if not is_v21_plus:
+            if verbose:
+                print("    Rejected: not v2.1+ format")
+            return False
         
         # Check if observation.images.* directories exist
         has_front = any('observation.images.front' in s for s in siblings)
