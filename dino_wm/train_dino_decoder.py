@@ -96,6 +96,18 @@ def main():
         default="Decoder",
         help="Wandb run name (default: Decoder).",
     )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=str,
+        default=None,
+        help="Path to a checkpoint to resume training from.",
+    )
+    parser.add_argument(
+        "--start-iter",
+        type=int,
+        default=0,
+        help="Iteration to start training from (default: 0).",
+    )
     args = parser.parse_args()
 
     wandb.init(
@@ -145,6 +157,11 @@ def main():
     device = args.device
     
     decoder = VQVAE().to(device)
+    
+    if args.resume_checkpoint is not None:
+        print(f"Resuming from checkpoint: {args.resume_checkpoint}")
+        decoder.load_state_dict(torch.load(args.resume_checkpoint, map_location=device))
+
     print('decoder with parameters', count_parameters(decoder))
     
     optimizer = AdamW([
@@ -156,7 +173,8 @@ def main():
     train_losses = []
     eval_losses = []
     train_iter = args.train_iters
-    for i in range(train_iter):
+    start_iter = args.start_iter
+    for i in range(start_iter, train_iter):
         if i % len(expert_loader) == 0:
             expert_loader = iter(DataLoader(expert_data, batch_size=BS, shuffle=True))
         if i % len(expert_loader_eval) == 0:

@@ -208,7 +208,7 @@ class VQVAE(nn.Module):
         else:
             quant_b, diff_b = input, torch.zeros(1).to(input.device)
 
-        quant_b = quant_b.permute(0, 3, 1, 2)
+        quant_b = quant_b.permute(0, 3, 1, 2)   # (b, t, num_patches, emb_dim) -> (b, emb_dim, t, num_patches)
         diff_b = diff_b.unsqueeze(0)
         dec = self.decode(quant_b)
 

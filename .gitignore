@@ -13,6 +13,8 @@ logs/
 *.json
 *.txt 
 
+*_checkpoints/
+
 *_videos/
 
 **/__pycache__/
