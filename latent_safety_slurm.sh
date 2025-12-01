@@ -25,7 +25,7 @@ repo="latent_safety"
 repo_dir="${home_dir}/${repo}"
 data_dir="${scratch_dir}/${repo}"
 container="${repo_dir}/container/${repo}_arm64.sif"
-entrypoint="python dino_wm/train_dino_decoder.py --hdf5-file ${data_dir}/arx5_subset_train.h5 --resume-checkpoint dino_decoder_checkpoints/testing_decoder.pth --start-iter 2300 --batch-size 256"
+entrypoint="bash -c 'python scripts/combine_hdf5_datasets.py --inputs ${data_dir}/arx5_datasets.h5 ${data_dir}/arx5_datasets_remaining.h5 --output ${data_dir}/arx5_datasets_combined.h5 && python scripts/validate_hdf5_dataset.py ${data_dir}/arx5_datasets_combined.h5'"
 
 start_time="$(date -Is --utc)"
 

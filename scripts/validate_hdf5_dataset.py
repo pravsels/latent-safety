@@ -2,6 +2,8 @@
 """
 Validate the integrity of an HDF5 dataset created by lerobot_to_hdf5.py
 Checks for corruption, missing data, and reports dataset statistics.
+
+python scripts/validate_hdf5_dataset.py arx5_datasets.h5
 """
 
 import argparse

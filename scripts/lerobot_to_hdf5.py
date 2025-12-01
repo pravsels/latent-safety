@@ -4,10 +4,10 @@ Convert Hugging Face LeRobot datasets into a consolidated HDF5 file for DINO-WM.
 
 QUICKSTART:
     # Fresh start
-    python scripts/lerobot_to_hdf5_resumable.py \
+    python scripts/lerobot_to_hdf5.py \
         --datasets-list arx5_datasets.json \
         --output-hdf5 arx5_datasets.h5 \
-        --batch-size 256 
+        --batch-size 256 --resume
 
 CRASH-RESISTANT VERSION with:
 - Resume capability (can continue from interruptions)
@@ -84,20 +84,12 @@ def data_generator(
                     yield (ep_idx, None)
                     continue
                 
-                # Load Raw Data
-                batch = dataset.hf_dataset[start_idx:end_idx]
-                
-                # Get Timestamps
-                ts_raw = batch["timestamp"]
-                timestamps = [t.item() if isinstance(t, torch.Tensor) else t for t in ts_raw]
-                
-                # Package metadata
+                # Package metadata - pass dataset ref instead of loading full batch
                 data = {
+                    "dataset": dataset,
                     "start_idx": start_idx,
                     "end_idx": end_idx,
                     "total_frames": total_frames,
-                    "timestamps": timestamps,
-                    "hf_batch": batch
                 }
                 yield (ep_idx, data)
                 
@@ -207,34 +199,45 @@ def process_dataset(
             continue
             
         # Success - Process on GPU in CHUNKS
+        # Success - Process on GPU in CHUNKS
         try:
             start_idx = payload["start_idx"]
             end_idx = payload["end_idx"]
             total_frames = payload["total_frames"]
-            timestamps = payload["timestamps"]
-            batch = payload["hf_batch"]
+            dataset_ref = payload["dataset"]
             
-            # Init accumulators
-            chunk_wrist_imgs = []
-            chunk_front_imgs = []
-            chunk_wrist_emb = []
-            chunk_front_emb = []
+            # Prepare HDF5 Group
+            grp_name = f"trajectory_{start_traj_idx}"
+            if grp_name in hdf_file:
+                del hdf_file[grp_name]
+            grp = hdf_file.create_group(grp_name)
+            
+            datasets_initialized = False
             
             # --- Chunked Processing ---
             for i in range(0, total_frames, batch_size):
                 if SHUTDOWN_REQUESTED:
                     break
                     
-                batch_timestamps = timestamps[i : i + batch_size]
-                query = {k: batch_timestamps for k in dataset.meta.video_keys}
-                video_frames = dataset._query_videos(query, ep_idx)
+                chunk_start = start_idx + i
+                chunk_end = min(start_idx + i + batch_size, end_idx)
+                
+                # Load Chunk
+                batch = dataset_ref.hf_dataset[chunk_start:chunk_end]
+                
+                # Get Timestamps for video query
+                ts_raw = batch["timestamp"]
+                batch_timestamps = [t.item() if isinstance(t, torch.Tensor) else t for t in ts_raw]
+                
+                query = {k: batch_timestamps for k in dataset_ref.meta.video_keys}
+                video_frames = dataset_ref._query_videos(query, ep_idx)
                 
                 # --- Handle Wrist ---
                 if "observation.images.wrist" in video_frames:
                     w_mini = video_frames["observation.images.wrist"]
                 elif "observation.images.wrist" in batch:
-                    wrist_data = batch["observation.images.wrist"][i : i + batch_size]
-                    w_mini = torch.stack(wrist_data)
+                    wrist_data = batch["observation.images.wrist"]
+                    w_mini = torch.stack(wrist_data) if isinstance(wrist_data, list) else wrist_data
                 else:
                     raise ValueError("Missing observation.images.wrist")
 
@@ -242,8 +245,8 @@ def process_dataset(
                 if "observation.images.front" in video_frames:
                     f_mini = video_frames["observation.images.front"]
                 elif "observation.images.front" in batch:
-                    front_data = batch["observation.images.front"][i : i + batch_size]
-                    f_mini = torch.stack(front_data)
+                    front_data = batch["observation.images.front"]
+                    f_mini = torch.stack(front_data) if isinstance(front_data, list) else front_data
                 else:
                     raise ValueError("Missing observation.images.front")
                 
@@ -252,8 +255,8 @@ def process_dataset(
                 f_mini = f_mini.to(device, dtype=torch.float32)
                 
                 # Store Images (uint8)
-                chunk_wrist_imgs.append(to_hwc_uint8(w_mini))
-                chunk_front_imgs.append(to_hwc_uint8(f_mini))
+                w_uint8 = to_hwc_uint8(w_mini)
+                f_uint8 = to_hwc_uint8(f_mini)
                 
                 # Inference
                 with torch.no_grad():
@@ -262,74 +265,73 @@ def process_dataset(
                     
                     w_emb = dino_model.forward_features(w_prep)["x_norm_patchtokens"].cpu().numpy()
                     f_emb = dino_model.forward_features(f_prep)["x_norm_patchtokens"].cpu().numpy()
-                    
-                    chunk_wrist_emb.append(w_emb)
-                    chunk_front_emb.append(f_emb)
                 
                 del w_mini, f_mini, w_prep, f_prep, video_frames
+                
+                # --- Handle Non-Video Data (Actions/States) ---
+                act = batch["action"]
+                if isinstance(act, list):
+                    cleaned_act = []
+                    for a in act:
+                        if isinstance(a, torch.Tensor):
+                            if a.is_sparse:
+                                a = a.to_dense()
+                            cleaned_act.append(a)
+                        else:
+                            cleaned_act.append(torch.tensor(a))
+                    act = torch.stack(cleaned_act)
+                act_np = act.numpy()
+            
+                # States
+                st_np = None
+                if "observation.state" in batch:
+                    st = batch["observation.state"]
+                    if isinstance(st, list):
+                        cleaned_st = []
+                        for s in st:
+                            if isinstance(s, torch.Tensor):
+                                if s.is_sparse:
+                                    s = s.to_dense()
+                                cleaned_st.append(s)
+                            else:
+                                cleaned_st.append(torch.tensor(s))
+                        st = torch.stack(cleaned_st)
+                    st_np = st.numpy()
+
+                # --- Write to HDF5 (Incremental) ---
+                if not datasets_initialized:
+                    grp.create_dataset("camera_0", data=w_uint8, maxshape=(None, *w_uint8.shape[1:]), compression="gzip", chunks=True)
+                    grp.create_dataset("camera_1", data=f_uint8, maxshape=(None, *f_uint8.shape[1:]), compression="gzip", chunks=True)
+                    grp.create_dataset("actions", data=act_np, maxshape=(None, *act_np.shape[1:]), chunks=True)
+                    grp.create_dataset("cam_rs_embd", data=w_emb, maxshape=(None, *w_emb.shape[1:]), chunks=True)
+                    grp.create_dataset("cam_zed_embd", data=f_emb, maxshape=(None, *f_emb.shape[1:]), chunks=True)
+                    
+                    if st_np is not None:
+                        grp.create_dataset("states", data=st_np, maxshape=(None, *st_np.shape[1:]), chunks=True)
+                    datasets_initialized = True
+                else:
+                    # Resize and Append
+                    for name, arr in [
+                        ("camera_0", w_uint8), ("camera_1", f_uint8), 
+                        ("actions", act_np), ("cam_rs_embd", w_emb), ("cam_zed_embd", f_emb)
+                    ]:
+                        grp[name].resize(grp[name].shape[0] + arr.shape[0], axis=0)
+                        grp[name][-arr.shape[0]:] = arr
+                    
+                    if st_np is not None:
+                        if "states" in grp:
+                            grp["states"].resize(grp["states"].shape[0] + st_np.shape[0], axis=0)
+                            grp["states"][-st_np.shape[0]:] = st_np
 
             if SHUTDOWN_REQUESTED:
                 pbar.update(1)
                 continue
 
-            # --- Handle Non-Video Data (Actions/States) ---
-            act = batch["action"]
-            if isinstance(act, list):
-                cleaned_act = []
-                for a in act:
-                    if isinstance(a, torch.Tensor):
-                        if a.is_sparse:
-                            a = a.to_dense()
-                        cleaned_act.append(a)
-                    else:
-                        cleaned_act.append(torch.tensor(a))
-                act = torch.stack(cleaned_act)
-            
-            # States
-            st = None
-            if "observation.state" in batch:
-                st = batch["observation.state"]
-                if isinstance(st, list):
-                    cleaned_st = []
-                    for s in st:
-                        if isinstance(s, torch.Tensor):
-                            if s.is_sparse:
-                                s = s.to_dense()
-                            cleaned_st.append(s)
-                        else:
-                            cleaned_st.append(torch.tensor(s))
-                    st = torch.stack(cleaned_st)
-
-            # Concatenate
-            wrist_uint8 = np.concatenate(chunk_wrist_imgs, axis=0)
-            front_uint8 = np.concatenate(chunk_front_imgs, axis=0)
-            w_emb_np = np.concatenate(chunk_wrist_emb, axis=0)
-            f_emb_np = np.concatenate(chunk_front_emb, axis=0)
-            act_np = act.numpy()
-            st_np = st.numpy() if st is not None else None
-            
-            # --- Write to HDF5 ---
-            grp_name = f"trajectory_{start_traj_idx}"
-            if grp_name in hdf_file:
-                del hdf_file[grp_name]
-                
-            grp = hdf_file.create_group(grp_name)
-            
-            grp.create_dataset("camera_0", data=wrist_uint8, compression="gzip")
-            grp.create_dataset("camera_1", data=front_uint8, compression="gzip")
-            grp.create_dataset("actions", data=act_np)
-            grp.create_dataset("cam_rs_embd", data=w_emb_np)
-            grp.create_dataset("cam_zed_embd", data=f_emb_np)
-            
-            if st_np is not None:
-                grp.create_dataset("states", data=st_np)
-                
             # Metadata
             grp.attrs["dataset_id"] = dataset_id
             grp.attrs["original_episode_index"] = ep_idx
             
-            # Flush after EVERY trajectory for maximum safety against abrupt kills
-            # This is slower but ensures no data loss even if process is killed
+            # Flush after EVERY trajectory
             hdf_file.flush()
             
             # Quick validation: verify we can read back what we just wrote

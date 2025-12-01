@@ -4,7 +4,11 @@ Train the DINO decoder (VQVAE) to reconstruct both cameras from DINO patch embed
 
 Quickstart:
 
-  python dino_wm/train_dino_decoder.py --hdf5-file test_v2.h5 --batch-size 2
+  python dino_wm/train_dino_decoder.py \
+  --hdf5-file ${data_dir}/arx5_subset_train.h5 \
+  --resume-checkpoint dino_decoder_checkpoints/testing_decoder.pth \
+  --start-iter 2300 \
+  --batch-size 256
 """
 
 import argparse
