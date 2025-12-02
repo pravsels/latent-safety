@@ -74,82 +74,39 @@ def download_chunk(repo_id, filename, local_dir, token=None):
 
 def merge_chunk_into_output(chunk_path, output_path, trajectory_offset, max_memory_gb=50.0):
     """
-    Merge trajectories from chunk into output file using batched approach.
-    Reads multiple trajectories into memory before writing for efficiency.
+    Merge trajectories from chunk into output file using efficient HDF5 copy.
+    Uses h5py's native copy to avoid loading data into Python memory, preventing SegFaults on large files.
     
     Args:
         chunk_path: Path to source chunk HDF5 file
         output_path: Path to output HDF5 file
         trajectory_offset: Starting trajectory number in output
-        max_memory_gb: Max memory for trajectory batch before writing (default 50GB)
+        max_memory_gb: Ignored (kept for compatibility), uses streaming copy.
     
     Returns the number of trajectories copied.
     """
-    max_bytes = int(max_memory_gb * 1024**3)
-    
-    with h5py.File(chunk_path, "r") as f_chunk:
+    # Open both files simultaneously
+    with h5py.File(chunk_path, "r") as f_chunk, \
+         h5py.File(output_path, "a", libver="latest") as f_out:
+        
         traj_keys = sorted(
             [k for k in f_chunk.keys() if k.startswith("trajectory_")],
             key=lambda x: int(x.split("_")[1])
         )
         
-        batch = []  # List of (traj_data_dict, traj_attrs)
-        batch_bytes = 0
         traj_counter = 0
         
-        for idx, src_key in enumerate(traj_keys):
-            # Read entire trajectory into memory
-            traj_data = {}
-            traj_attrs = dict(f_chunk[src_key].attrs)
-            traj_bytes = 0
+        # Use tqdm for progress bar
+        for src_key in tqdm(traj_keys, desc="      Merging", unit="traj", leave=False):
+            dst_key = f"trajectory_{trajectory_offset + traj_counter}"
             
-            src_group = f_chunk[src_key]
-            for dataset_key in src_group.keys():
-                item = src_group[dataset_key]
-                if isinstance(item, h5py.Dataset):
-                    data = item[()]  # Read entire dataset into numpy array
-                    traj_data[dataset_key] = {
-                        'data': data,
-                        'attrs': dict(item.attrs),
-                        'chunks': item.chunks,
-                        'compression': item.compression,
-                        'compression_opts': item.compression_opts if item.compression else None
-                    }
-                    traj_bytes += data.nbytes
-            
-            batch.append((traj_data, traj_attrs))
-            batch_bytes += traj_bytes
-            
-            # Write batch if we hit memory limit or last trajectory
-            is_last = (idx == len(traj_keys) - 1)
-            if batch_bytes >= max_bytes or is_last:
-                # Write all trajectories in batch
-                mode = "a" if output_path.exists() else "w"
-                with h5py.File(output_path, mode, libver="latest") as f_out:
-                    for traj_data, traj_attrs in batch:
-                        dst_key = f"trajectory_{trajectory_offset + traj_counter}"
-                        dst_group = f_out.create_group(dst_key)
-                        for attr_key, attr_val in traj_attrs.items():
-                            dst_group.attrs[attr_key] = attr_val
-                        
-                        for dataset_key, ds_info in traj_data.items():
-                            chunks = ds_info['chunks'] if ds_info['chunks'] else True
-                            ds = dst_group.create_dataset(
-                                dataset_key,
-                                data=ds_info['data'],
-                                chunks=chunks,
-                                compression=ds_info['compression'],
-                                compression_opts=ds_info['compression_opts']
-                            )
-                            for attr_key, attr_val in ds_info['attrs'].items():
-                                ds.attrs[attr_key] = attr_val
-                        
-                        traj_counter += 1
+            # Efficient C-level copy without loading into Python memory
+            if dst_key in f_out:
+                del f_out[dst_key]
                 
-                print(f"      📝 Wrote batch: {len(batch)} trajectories, {batch_bytes / 1024**3:.2f} GB")
-                batch = []
-                batch_bytes = 0
-        
+            f_chunk.copy(src_key, f_out, name=dst_key)
+            traj_counter += 1
+            
         return traj_counter
 
 
