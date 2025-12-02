@@ -2,15 +2,15 @@
 """
 Download chunked HDF5 dataset from Hugging Face Hub and reassemble into a single file.
 
-Downloads chunks one at a time, merges them, then deletes the chunk to save disk space.
+Downloads chunks one at a time, batches trajectories in memory, then writes to disk.
 Automatically resumes from existing output file if present.
 
 Usage:
-    # With custom memory budget (default 20GB):
+    # With larger memory budget for faster batching:
     python scripts/chunked_download_from_hf.py \
         --repo-id pravsels/arx5-robot-dataset \
         --output arx5_dataset.h5 \
-        --max-memory-gb 50
+        --max-memory-gb 100
 
     # Start fresh (overwrite existing):
     python scripts/chunked_download_from_hf.py \
@@ -72,90 +72,85 @@ def download_chunk(repo_id, filename, local_dir, token=None):
     )
 
 
-def copy_group_recursive(src_group, dst_group, max_memory_gb=20.0):
+def merge_chunk_into_output(chunk_path, output_path, trajectory_offset, max_memory_gb=50.0):
     """
-    Recursively copy HDF5 group contents in a memory-efficient way.
-    Copies datasets in slices based on memory budget.
+    Merge trajectories from chunk into output file using batched approach.
+    Reads multiple trajectories into memory before writing for efficiency.
     
     Args:
-        max_memory_gb: Maximum memory per slice in GB (default 20GB)
+        chunk_path: Path to source chunk HDF5 file
+        output_path: Path to output HDF5 file
+        trajectory_offset: Starting trajectory number in output
+        max_memory_gb: Max memory for trajectory batch before writing (default 50GB)
+    
+    Returns the number of trajectories copied.
     """
     max_bytes = int(max_memory_gb * 1024**3)
     
-    for key in src_group.keys():
-        item = src_group[key]
-        if isinstance(item, h5py.Dataset):
-            # Create empty dataset with same shape/dtype
-            chunks = item.chunks if item.chunks else True
-            dst_ds = dst_group.create_dataset(
-                key,
-                shape=item.shape,
-                dtype=item.dtype,
-                chunks=chunks,
-                compression=item.compression,
-                compression_opts=item.compression_opts if item.compression else None,
-            )
-            
-            # Copy data in slices along first dimension to save memory
-            if item.size > 0 and len(item.shape) > 0:
-                total_rows = item.shape[0]
-                
-                # Calculate bytes per row and optimal slice size
-                bytes_per_row = item.dtype.itemsize
-                for dim in item.shape[1:]:
-                    bytes_per_row *= dim
-                
-                # Calculate slice size based on memory budget
-                slice_size = max(1, max_bytes // bytes_per_row)
-                slice_size = min(slice_size, total_rows)  # Don't exceed total
-                
-                for start in range(0, total_rows, slice_size):
-                    end = min(start + slice_size, total_rows)
-                    dst_ds[start:end] = item[start:end]
-            elif item.size > 0:
-                # Scalar or 0-dim array
-                dst_ds[()] = item[()]
-            
-            # Copy attributes
-            for attr_key, attr_val in item.attrs.items():
-                dst_ds.attrs[attr_key] = attr_val
-                
-        elif isinstance(item, h5py.Group):
-            # Recursively copy subgroups
-            subgroup = dst_group.create_group(key)
-            # Copy group attributes
-            for attr_key, attr_val in item.attrs.items():
-                subgroup.attrs[attr_key] = attr_val
-            copy_group_recursive(item, subgroup, max_memory_gb)
-
-
-def merge_chunk_into_output(chunk_path, output_path, trajectory_offset, max_memory_gb=20.0):
-    """
-    Merge trajectories from chunk into output file.
-    Renumbers trajectories starting from trajectory_offset.
-    Returns the number of trajectories copied.
-    """
     with h5py.File(chunk_path, "r") as f_chunk:
-        # Get all trajectory keys from chunk
         traj_keys = sorted(
             [k for k in f_chunk.keys() if k.startswith("trajectory_")],
             key=lambda x: int(x.split("_")[1])
         )
         
-        # Open output in append mode (or create if first chunk)
-        mode = "a" if output_path.exists() else "w"
-        with h5py.File(output_path, mode, libver="latest") as f_out:
-            for i, src_key in enumerate(traj_keys):
-                dst_key = f"trajectory_{trajectory_offset + i}"
-                # Create destination group and copy recursively
-                dst_group = f_out.create_group(dst_key)
-                src_group = f_chunk[src_key]
-                # Copy group attributes
-                for attr_key, attr_val in src_group.attrs.items():
-                    dst_group.attrs[attr_key] = attr_val
-                copy_group_recursive(src_group, dst_group, max_memory_gb)
+        batch = []  # List of (traj_data_dict, traj_attrs)
+        batch_bytes = 0
+        traj_counter = 0
         
-        return len(traj_keys)
+        for idx, src_key in enumerate(traj_keys):
+            # Read entire trajectory into memory
+            traj_data = {}
+            traj_attrs = dict(f_chunk[src_key].attrs)
+            traj_bytes = 0
+            
+            src_group = f_chunk[src_key]
+            for dataset_key in src_group.keys():
+                item = src_group[dataset_key]
+                if isinstance(item, h5py.Dataset):
+                    data = item[()]  # Read entire dataset into numpy array
+                    traj_data[dataset_key] = {
+                        'data': data,
+                        'attrs': dict(item.attrs),
+                        'chunks': item.chunks,
+                        'compression': item.compression,
+                        'compression_opts': item.compression_opts if item.compression else None
+                    }
+                    traj_bytes += data.nbytes
+            
+            batch.append((traj_data, traj_attrs))
+            batch_bytes += traj_bytes
+            
+            # Write batch if we hit memory limit or last trajectory
+            is_last = (idx == len(traj_keys) - 1)
+            if batch_bytes >= max_bytes or is_last:
+                # Write all trajectories in batch
+                mode = "a" if output_path.exists() else "w"
+                with h5py.File(output_path, mode, libver="latest") as f_out:
+                    for traj_data, traj_attrs in batch:
+                        dst_key = f"trajectory_{trajectory_offset + traj_counter}"
+                        dst_group = f_out.create_group(dst_key)
+                        for attr_key, attr_val in traj_attrs.items():
+                            dst_group.attrs[attr_key] = attr_val
+                        
+                        for dataset_key, ds_info in traj_data.items():
+                            chunks = ds_info['chunks'] if ds_info['chunks'] else True
+                            ds = dst_group.create_dataset(
+                                dataset_key,
+                                data=ds_info['data'],
+                                chunks=chunks,
+                                compression=ds_info['compression'],
+                                compression_opts=ds_info['compression_opts']
+                            )
+                            for attr_key, attr_val in ds_info['attrs'].items():
+                                ds.attrs[attr_key] = attr_val
+                        
+                        traj_counter += 1
+                
+                print(f"      📝 Wrote batch: {len(batch)} trajectories, {batch_bytes / 1024**3:.2f} GB")
+                batch = []
+                batch_bytes = 0
+        
+        return traj_counter
 
 
 def get_existing_trajectory_count(output_path):
@@ -210,8 +205,8 @@ def main():
     parser.add_argument(
         "--max-memory-gb",
         type=float,
-        default=20.0,
-        help="Max memory per slice in GB (default: 20)"
+        default=50.0,
+        help="Max memory for trajectory batch before writing (default: 50)"
     )
     args = parser.parse_args()
 
