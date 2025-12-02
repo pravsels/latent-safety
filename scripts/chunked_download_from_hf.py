@@ -6,9 +6,11 @@ Downloads chunks one at a time, merges them, then deletes the chunk to save disk
 Automatically resumes from existing output file if present.
 
 Usage:
+    # With custom memory budget (default 20GB):
     python scripts/chunked_download_from_hf.py \
         --repo-id pravsels/arx5-robot-dataset \
-        --output arx5_dataset.h5
+        --output arx5_dataset.h5 \
+        --max-memory-gb 50
 
     # Start fresh (overwrite existing):
     python scripts/chunked_download_from_hf.py \
@@ -70,13 +72,13 @@ def download_chunk(repo_id, filename, local_dir, token=None):
     )
 
 
-def copy_group_recursive(src_group, dst_group, max_memory_gb=100.0):
+def copy_group_recursive(src_group, dst_group, max_memory_gb=20.0):
     """
     Recursively copy HDF5 group contents in a memory-efficient way.
     Copies datasets in slices based on memory budget.
     
     Args:
-        max_memory_gb: Maximum memory per slice in GB (default 100GB)
+        max_memory_gb: Maximum memory per slice in GB (default 20GB)
     """
     max_bytes = int(max_memory_gb * 1024**3)
     
@@ -127,7 +129,7 @@ def copy_group_recursive(src_group, dst_group, max_memory_gb=100.0):
             copy_group_recursive(item, subgroup, max_memory_gb)
 
 
-def merge_chunk_into_output(chunk_path, output_path, trajectory_offset):
+def merge_chunk_into_output(chunk_path, output_path, trajectory_offset, max_memory_gb=20.0):
     """
     Merge trajectories from chunk into output file.
     Renumbers trajectories starting from trajectory_offset.
@@ -151,7 +153,7 @@ def merge_chunk_into_output(chunk_path, output_path, trajectory_offset):
                 # Copy group attributes
                 for attr_key, attr_val in src_group.attrs.items():
                     dst_group.attrs[attr_key] = attr_val
-                copy_group_recursive(src_group, dst_group, max_memory_gb=100.0)
+                copy_group_recursive(src_group, dst_group, max_memory_gb)
         
         return len(traj_keys)
 
@@ -204,6 +206,12 @@ def main():
         type=int, 
         default=None,
         help="Start from specific chunk number (1-indexed). Overrides auto-resume."
+    )
+    parser.add_argument(
+        "--max-memory-gb",
+        type=float,
+        default=20.0,
+        help="Max memory per slice in GB (default: 20)"
     )
     args = parser.parse_args()
 
@@ -298,7 +306,8 @@ def main():
             num_copied = merge_chunk_into_output(
                 local_chunk_path, 
                 output_path, 
-                total_trajectories
+                total_trajectories,
+                args.max_memory_gb
             )
             total_trajectories += num_copied
             print(f"   ✅ Merged {num_copied} trajectories (total: {total_trajectories})")
