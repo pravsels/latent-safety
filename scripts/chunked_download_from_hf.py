@@ -70,6 +70,49 @@ def download_chunk(repo_id, filename, local_dir, token=None):
     )
 
 
+def copy_group_recursive(src_group, dst_group):
+    """
+    Recursively copy HDF5 group contents in a memory-efficient way.
+    Copies datasets in slices rather than loading entirely into memory.
+    """
+    for key in src_group.keys():
+        item = src_group[key]
+        if isinstance(item, h5py.Dataset):
+            # Create empty dataset with same shape/dtype
+            chunks = item.chunks if item.chunks else True
+            dst_ds = dst_group.create_dataset(
+                key,
+                shape=item.shape,
+                dtype=item.dtype,
+                chunks=chunks,
+                compression=item.compression,
+                compression_opts=item.compression_opts if item.compression else None,
+            )
+            
+            # Copy data in slices along first dimension to save memory
+            if item.size > 0 and len(item.shape) > 0:
+                total_rows = item.shape[0]
+                slice_size = 100  # Copy 100 rows at a time
+                for start in range(0, total_rows, slice_size):
+                    end = min(start + slice_size, total_rows)
+                    dst_ds[start:end] = item[start:end]
+            elif item.size > 0:
+                # Scalar or 0-dim array
+                dst_ds[()] = item[()]
+            
+            # Copy attributes
+            for attr_key, attr_val in item.attrs.items():
+                dst_ds.attrs[attr_key] = attr_val
+                
+        elif isinstance(item, h5py.Group):
+            # Recursively copy subgroups
+            subgroup = dst_group.create_group(key)
+            # Copy group attributes
+            for attr_key, attr_val in item.attrs.items():
+                subgroup.attrs[attr_key] = attr_val
+            copy_group_recursive(item, subgroup)
+
+
 def merge_chunk_into_output(chunk_path, output_path, trajectory_offset):
     """
     Merge trajectories from chunk into output file.
@@ -88,7 +131,13 @@ def merge_chunk_into_output(chunk_path, output_path, trajectory_offset):
         with h5py.File(output_path, mode, libver="latest") as f_out:
             for i, src_key in enumerate(traj_keys):
                 dst_key = f"trajectory_{trajectory_offset + i}"
-                f_out.copy(f_chunk[src_key], dst_key)
+                # Create destination group and copy recursively
+                dst_group = f_out.create_group(dst_key)
+                src_group = f_chunk[src_key]
+                # Copy group attributes
+                for attr_key, attr_val in src_group.attrs.items():
+                    dst_group.attrs[attr_key] = attr_val
+                copy_group_recursive(src_group, dst_group)
         
         return len(traj_keys)
 
