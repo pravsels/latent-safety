@@ -70,11 +70,16 @@ def download_chunk(repo_id, filename, local_dir, token=None):
     )
 
 
-def copy_group_recursive(src_group, dst_group):
+def copy_group_recursive(src_group, dst_group, max_memory_gb=100.0):
     """
     Recursively copy HDF5 group contents in a memory-efficient way.
-    Copies datasets in slices rather than loading entirely into memory.
+    Copies datasets in slices based on memory budget.
+    
+    Args:
+        max_memory_gb: Maximum memory per slice in GB (default 100GB)
     """
+    max_bytes = int(max_memory_gb * 1024**3)
+    
     for key in src_group.keys():
         item = src_group[key]
         if isinstance(item, h5py.Dataset):
@@ -92,7 +97,16 @@ def copy_group_recursive(src_group, dst_group):
             # Copy data in slices along first dimension to save memory
             if item.size > 0 and len(item.shape) > 0:
                 total_rows = item.shape[0]
-                slice_size = 100  # Copy 100 rows at a time
+                
+                # Calculate bytes per row and optimal slice size
+                bytes_per_row = item.dtype.itemsize
+                for dim in item.shape[1:]:
+                    bytes_per_row *= dim
+                
+                # Calculate slice size based on memory budget
+                slice_size = max(1, max_bytes // bytes_per_row)
+                slice_size = min(slice_size, total_rows)  # Don't exceed total
+                
                 for start in range(0, total_rows, slice_size):
                     end = min(start + slice_size, total_rows)
                     dst_ds[start:end] = item[start:end]
@@ -110,7 +124,7 @@ def copy_group_recursive(src_group, dst_group):
             # Copy group attributes
             for attr_key, attr_val in item.attrs.items():
                 subgroup.attrs[attr_key] = attr_val
-            copy_group_recursive(item, subgroup)
+            copy_group_recursive(item, subgroup, max_memory_gb)
 
 
 def merge_chunk_into_output(chunk_path, output_path, trajectory_offset):
@@ -137,7 +151,7 @@ def merge_chunk_into_output(chunk_path, output_path, trajectory_offset):
                 # Copy group attributes
                 for attr_key, attr_val in src_group.attrs.items():
                     dst_group.attrs[attr_key] = attr_val
-                copy_group_recursive(src_group, dst_group)
+                copy_group_recursive(src_group, dst_group, max_memory_gb=100.0)
         
         return len(traj_keys)
 
