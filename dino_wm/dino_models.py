@@ -50,19 +50,23 @@ def batch_rotvec_to_quat(rotvecs):
     quaternions = r.as_quat()
     return quaternions
 
-def normalize_acs(acs, device='cuda:0'):
-    max_ac = torch.tensor([0.89928758, 0.71893158, 0.69869383, 0.32456627, 0.51343921, 0.28401476, 1.        ]).to(device)
-    min_ac = torch.tensor([-0.78933347, -1.         ,-0.95038878, -0.3243517,  -0.30636792, -0.30071826 ,-1.        ]).to(device)
-    
+def normalize_acs(acs, min_ac, max_ac):
+    if min_ac.device != acs.device:
+        min_ac = min_ac.to(acs.device)
+    if max_ac.device != acs.device:
+        max_ac = max_ac.to(acs.device)
+        
     norm_acs = (acs - min_ac) / (max_ac - min_ac)
     
     return norm_acs
 
-def unnormalize_acs(acs, device='cuda:0'):
-    max_ac = torch.tensor([0.89928758, 0.71893158, 0.69869383, 0.32456627, 0.51343921, 0.28401476, 1.        ]).to(device)
-    min_ac = torch.tensor([-0.78933347, -1.         ,-0.95038878, -0.3243517,  -0.30636792, -0.30071826 ,-1.        ]).to(device)
+def unnormalize_acs(acs, min_ac, max_ac):
+    if min_ac.device != acs.device:
+        min_ac = min_ac.to(acs.device)
+    if max_ac.device != acs.device:
+        max_ac = max_ac.to(acs.device)
     
-    acs = (acs*(max_ac - min_ac)) + min_ac
+    acs = (acs * (max_ac - min_ac)) + min_ac
     
     return acs
 

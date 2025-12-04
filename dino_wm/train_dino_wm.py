@@ -14,6 +14,7 @@ With custom parameters:
 import argparse
 import os
 import h5py
+import json
 import numpy as np
 import torch
 import random
@@ -163,6 +164,12 @@ def main():
         default="dino_wm_checkpoints",
         help="Directory to save checkpoints (default: dino_wm_checkpoints).",
     )
+    parser.add_argument(
+        "--dataset-stats",
+        type=str,
+        default="dataset_stats.json",
+        help="Path to dataset statistics JSON file.",
+    )
     args = parser.parse_args()
 
     # Initialize wandb
@@ -188,6 +195,15 @@ def main():
     EVAL_H = args.eval_horizon
     H = args.context_length
     device = args.device
+    
+    # LOAD STATS
+    print(f"Loading dataset stats from {args.dataset_stats}")
+    with open(args.dataset_stats, 'r') as f:
+        stats = json.load(f)
+    
+    # Create tensors on device
+    action_min = torch.tensor(stats['action_min']).float().to(device)
+    action_max = torch.tensor(stats['action_max']).float().to(device)
 
     # Dataset setup
     hdf5_file = args.hdf5_file
@@ -272,7 +288,7 @@ def main():
         output_state = data_state[:, 1:]
 
         data_acs = data['action'].to(device)
-        norm_acs = normalize_acs(data_acs, device)
+        norm_acs = normalize_acs(data_acs, action_min, action_max)
         acs = norm_acs[:, :-1]
 
         optimizer.zero_grad()
@@ -325,10 +341,10 @@ def main():
                 inputs2 = eval_data2[[0], :H].to(device)
                 
                 all_acs = eval_data['action'][[0]].to(device)
-                all_acs = normalize_acs(all_acs, device)
+                all_acs = normalize_acs(all_acs, action_min, action_max)
                 
                 acs = eval_data['action'][[0],:H].to(device)
-                acs = normalize_acs(acs, device)
+                acs = normalize_acs(acs, action_min, action_max)
 
                 inputs_states = eval_data['state'][[0],:H].to(device)
                 # Resize images to 224x224 to match decoder output
@@ -385,7 +401,7 @@ def main():
                 output_state = data_state[:, 1:]
 
                 data_acs = eval_data['action'].to(device)
-                data_acs = normalize_acs(data_acs, device)
+                data_acs = normalize_acs(data_acs, action_min, action_max)
                 acs = data_acs[:, :-1]
                 pred1, pred2, pred_state, _ = transition(inputs1, inputs2, states, acs)
 
