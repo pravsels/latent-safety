@@ -239,6 +239,7 @@ class VideoTransformer(nn.Module):
         dim: int,
         ac_dim: int,
         state_dim: int,
+        action_dim: int, # New parameter for physical action dimension
         depth: int,
         heads: int,
         mlp_dim: int,
@@ -255,7 +256,7 @@ class VideoTransformer(nn.Module):
         
         # Improved action embedding
         self.action_encoder = nn.Sequential(
-            nn.Linear(7, 128),
+            nn.Linear(action_dim, 128), # Uses dynamic dimension
             nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(0.1),

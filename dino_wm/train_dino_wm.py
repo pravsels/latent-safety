@@ -197,10 +197,23 @@ def main():
     device = args.device
     
     # LOAD STATS
-    print(f"Loading dataset stats from {args.dataset_stats}")
-    with open(args.dataset_stats, 'r') as f:
+    stats_path = args.dataset_stats
+    if not os.path.exists(stats_path):
+        raise FileNotFoundError(
+            f"Stats file '{stats_path}' not found! Please run scripts/compute_stats_json.py to generate it."
+        )
+
+    print(f"Loading dataset stats from {stats_path}")
+    with open(stats_path, 'r') as f:
         stats = json.load(f)
     
+    # Check for required keys
+    required_keys = ["action_min", "action_max"]
+    missing_keys = [k for k in required_keys if k not in stats]
+    
+    if missing_keys:
+        raise ValueError(f"Stats file missing required keys: {missing_keys}")
+
     # Create tensors on device
     action_min = torch.tensor(stats['action_min']).float().to(device)
     action_max = torch.tensor(stats['action_max']).float().to(device)
@@ -240,6 +253,7 @@ def main():
         dim=384,  # DINO feature dimension
         ac_dim=10,  # Action embedding dimension (output of action encoder)
         state_dim=args.state_dim,
+        action_dim=len(action_min),  # Infer physical action dim from stats
         depth=6,
         heads=16,
         mlp_dim=2048,
