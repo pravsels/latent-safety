@@ -213,7 +213,13 @@ def main():
     action_max = torch.tensor(stats['action_max']).float().to(device)
     state_min = torch.tensor(stats['state_min']).float().to(device)
     state_max = torch.tensor(stats['state_max']).float().to(device)
+    
+    # Infer dimensions from stats
     state_dim = len(stats['state_min'])
+    action_dim = len(stats['action_min'])
+    
+    print(f"Loaded state normalization stats from {stats_path}")
+    print(f"Inferred state_dim={state_dim}, action_dim={action_dim} from dataset stats")
 
     # Dataset setup
     hdf5_file = args.hdf5_file
@@ -248,9 +254,10 @@ def main():
     transition = VideoTransformer(
         image_size=(224, 224),
         dim=384,  # DINO feature dimension
-        ac_dim=10,  # Action embedding dimension (output of action encoder)
-        state_dim=state_dim,
-        action_dim=len(action_min),  # Infer physical action dim from stats
+        action_embed_dim=10,  # Action embedding dimension
+        state_embed_dim=10,  # State embedding dimension
+        state_dim=state_dim,  # Inferred from dataset stats
+        action_dim=action_dim,  # Inferred from dataset stats
         depth=6,
         heads=16,
         mlp_dim=2048,
@@ -258,8 +265,6 @@ def main():
         dropout=0.1
     ).to(device)
     transition.train()
-    
-    print(f"Initialized VideoTransformer with state_dim={state_dim}")
 
     # Optimizer
     optimizer = AdamW([
@@ -337,8 +342,7 @@ def main():
         scaler.step(optimizer)
         scaler.update()
         train_loss = loss.item()
-        print(f"\rIter {i}, TF Loss: {loss_tf:.4f}, AR loss:{loss_ar} front Loss: {im1_loss_tf.item():.4f}, wrist Loss: {im2_loss_tf.item():.4f}, state Loss: {state_loss_tf.item():.4f}", end='', flush=True)
-        print(f"\rIter {i}, TF Loss: {loss_tf:.4f}, front Loss: {im1_loss_tf.item():.4f}, wrist Loss: {im2_loss_tf.item():.4f}, state Loss: {state_loss_tf.item():.4f}", end='', flush=True)
+        print(f"\rIter {i}, TF Loss: {loss_tf:.4f}, AR loss:{loss_ar:.4f}, front Loss: {im1_loss_tf.item():.4f}, wrist Loss: {im2_loss_tf.item():.4f}, state Loss: {state_loss_tf.item():.4f}", end='', flush=True)
         wandb.log({'train_loss': loss_tf, "train_loss_ar": loss_ar})
         
         # Evaluation

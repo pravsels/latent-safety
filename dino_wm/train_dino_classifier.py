@@ -85,16 +85,36 @@ if __name__ == "__main__":
     
     # Load state normalization stats
     dataset_stats_path = 'dataset_stats.json'  # Update this path as needed
-    if os.path.exists(dataset_stats_path):
-        with open(dataset_stats_path, 'r') as f:
-            stats = json.load(f)
-        state_min = torch.tensor(stats['state_min']).float().to(device)
-        state_max = torch.tensor(stats['state_max']).float().to(device)
-        print(f"Loaded state normalization stats from {dataset_stats_path}")
-    else:
-        print(f"Warning: {dataset_stats_path} not found. States will not be normalized.")
-        state_min = None
-        state_max = None
+    if not os.path.exists(dataset_stats_path):
+        raise FileNotFoundError(
+            f"Stats file '{dataset_stats_path}' not found! Please run scripts/compute_stats_json.py to generate it."
+        )
+    
+    print(f"Loading dataset stats from {dataset_stats_path}")
+    with open(dataset_stats_path, 'r') as f:
+        stats = json.load(f)
+    
+    # Check for required keys
+    required_keys = ["action_min", "action_max", "state_min", "state_max"]
+    missing_keys = [k for k in required_keys if k not in stats]
+    
+    if missing_keys:
+        raise ValueError(f"Stats file missing required keys: {missing_keys}")
+    
+    device = 'cuda:0'
+    
+    # Create tensors on device
+    action_min = torch.tensor(stats['action_min']).float().to(device)
+    action_max = torch.tensor(stats['action_max']).float().to(device)
+    state_min = torch.tensor(stats['state_min']).float().to(device)
+    state_max = torch.tensor(stats['state_max']).float().to(device)
+    
+    # Infer dimensions from stats
+    state_dim = len(stats['state_min'])
+    action_dim = len(stats['action_min'])
+    
+    print(f"Loaded state normalization stats from {dataset_stats_path}")
+    print(f"Inferred state_dim={state_dim}, action_dim={action_dim} from dataset stats")
 
     expert_data = SplitTrajectoryDataset(hdf5_file, BL, split='train', num_test=0)
     expert_data_eval = SplitTrajectoryDataset(hdf5_file_test, BL, split='test', num_test=5)
@@ -103,8 +123,6 @@ if __name__ == "__main__":
     expert_loader = iter(DataLoader(expert_data, batch_size=BS, shuffle=True))
     expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
     expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
-
-    device = 'cuda:0'
    
     decoder = VQVAE().to(device)
     decoder.load_state_dict(torch.load('checkpoints/testing_decoder.pth'))
@@ -113,9 +131,10 @@ if __name__ == "__main__":
     transition = VideoTransformer(
         image_size=(224, 224),
         dim=384,  # DINO feature dimension
-        ac_dim=10,  # Action embedding dimension
-        state_dim=8,  # State dimension
-        action_dim=7,  # Physical action dimension (update if different)
+        action_embed_dim=10,  # Action embedding dimension
+        state_embed_dim=10,  # State embedding dimension
+        state_dim=state_dim,  # Inferred from dataset stats
+        action_dim=action_dim,  # Inferred from dataset stats
         depth=6,
         heads=16,
         mlp_dim=2048,
@@ -139,12 +158,13 @@ if __name__ == "__main__":
     output2 = data2[:, 1:]
 
     data_state = data['state'].to(device)
-    states = data_state[:, :-1]
-    output_state = data_state[:, 1:]
+    norm_states = normalize_states(data_state, state_min, state_max)
+    states = norm_states[:, :-1]
+    output_state = norm_states[:, 1:]
 
     data_acs = data['action'].to(device)
-    acs = data_acs[:, :-1]
-    acs = normalize_acs(acs, device)
+    norm_acs = normalize_acs(data_acs, action_min, action_max)
+    acs = norm_acs[:, :-1]
 
 
     # Forward pass
@@ -177,17 +197,13 @@ if __name__ == "__main__":
         output2 = data2[:, 1:]
 
         data_state = data['state'].to(device)
-        if state_min is not None and state_max is not None:
-            norm_states = normalize_states(data_state, state_min, state_max)
-            states = norm_states[:, :-1]
-            output_state = norm_states[:, 1:]
-        else:
-            states = data_state[:, :-1]
-            output_state = data_state[:, 1:]
+        norm_states = normalize_states(data_state, state_min, state_max)
+        states = norm_states[:, :-1]
+        output_state = norm_states[:, 1:]
 
         data_acs = data['action'].to(device)
-        acs = data_acs[:, :-1]
-        acs = normalize_acs(acs, device)
+        norm_acs = normalize_acs(data_acs, action_min, action_max)
+        acs = norm_acs[:, :-1]
         
         optimizer.zero_grad()
 
@@ -214,14 +230,11 @@ if __name__ == "__main__":
                 inputs1 = eval_data1[[0], :H].to(device)
                 inputs2 = eval_data2[[0], :H].to(device)
                 all_acs = eval_data['action'][[0]].to(device)
-                all_acs = normalize_acs(all_acs, device)
+                all_acs = normalize_acs(all_acs, action_min, action_max)
                 acs = eval_data['action'][[0],:H].to(device)
-                acs = normalize_acs(acs, device)
+                acs = normalize_acs(acs, action_min, action_max)
                 eval_states = eval_data['state'][[0],:H].to(device)
-                if state_min is not None and state_max is not None:
-                    states = normalize_states(eval_states, state_min, state_max)
-                else:
-                    states = eval_states
+                states = normalize_states(eval_states, state_min, state_max)
                 im1s = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.
                 im2s = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
                 for k in range(EVAL_H-H):
@@ -288,17 +301,13 @@ if __name__ == "__main__":
                 output2 = data2[:, 1:]
 
                 data_state = eval_data['state'].to(device)
-                if state_min is not None and state_max is not None:
-                    norm_eval_states = normalize_states(data_state, state_min, state_max)
-                    states = norm_eval_states[:, :-1]
-                    output_state = norm_eval_states[:, 1:]
-                else:
-                    states = data_state[:, :-1]
-                    output_state = data_state[:, 1:]
+                norm_eval_states = normalize_states(data_state, state_min, state_max)
+                states = norm_eval_states[:, :-1]
+                output_state = norm_eval_states[:, 1:]
 
                 data_acs = eval_data['action'].to(device)
-                acs = data_acs[:, :-1]
-                acs = normalize_acs(acs, device)
+                norm_acs = normalize_acs(data_acs, action_min, action_max)
+                acs = norm_acs[:, :-1]
 
                 pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs)
                 

@@ -75,11 +75,7 @@ from torch import nn
 
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
-from dino_models import Decoder, VideoTransformer, normalize_acs
-
-# helpers
-
-
+from dino_models import Decoder, VideoTransformer, normalize_acs, normalize_states
 
 
 DINO_transform = transforms.Compose([           
@@ -108,6 +104,7 @@ import collections
 from test_loader import SplitTrajectoryDataset
 from torch.utils.data import DataLoader
 from dino_decoders_official import VQVAE
+import json
 """
     Note that, we can pass arguments to the script by using
     python run_training_ddpg.py --task ra_droneracing_Game-v6 --control-net 512 512 512 512 --disturbance-net 512 512 512 512 --critic-net 512 512 512 512 --epoch 10 --total-episodes 160 --gamma 0.9
@@ -204,19 +201,51 @@ action_space = gym.spaces.Box(low=-0.15, high=0.15, shape=(7,), dtype=np.float32
 
 config.num_actions = action_space.n if hasattr(action_space, "n") else action_space.shape[0]
 
+# Load dataset stats to infer dimensions
+dataset_stats_path = 'dataset_stats.json'
+if not os.path.exists(dataset_stats_path):
+    raise FileNotFoundError(
+        f"Stats file '{dataset_stats_path}' not found! Please run scripts/compute_stats_json.py to generate it."
+    )
+
+print(f"Loading dataset stats from {dataset_stats_path}")
+with open(dataset_stats_path, 'r') as f:
+    stats = json.load(f)
+
+# Check for required keys
+required_keys = ["action_min", "action_max", "state_min", "state_max"]
+missing_keys = [k for k in required_keys if k not in stats]
+
+if missing_keys:
+    raise ValueError(f"Stats file missing required keys: {missing_keys}")
+
+# Infer dimensions from stats
+state_dim = len(stats['state_min'])
+action_dim = len(stats['action_min'])
+
+print(f"Loaded state normalization stats from {dataset_stats_path}")
+print(f"Inferred state_dim={state_dim}, action_dim={action_dim} from dataset stats")
+
+# Create tensors on device (will be used later for normalization)
+device = 'cuda:0'
+action_min = torch.tensor(stats['action_min']).float().to(device)
+action_max = torch.tensor(stats['action_max']).float().to(device)
+state_min = torch.tensor(stats['state_min']).float().to(device)
+state_max = torch.tensor(stats['state_max']).float().to(device)
 
 wm = VideoTransformer(
         image_size=(224, 224),
         dim=384,  # DINO feature dimension
-        ac_dim=10,  # Action embedding dimension
-        state_dim=8,  # State dimension
-        action_dim=7,  # Physical action dimension (update if different)
+        action_embed_dim=10,  # Action embedding dimension
+        state_embed_dim=10,  # State embedding dimension
+        state_dim=state_dim,  # Inferred from dataset stats
+        action_dim=action_dim,  # Inferred from dataset stats
         depth=6,
         heads=16,
         mlp_dim=2048,
         num_frames=3,
         dropout=0.1
-    )
+    ).to(device)
 
 #wm.load_state_dict(torch.load('checkpoints/claude_zero_wfail4900.pth'))
 #wm.load_state_dict(torch.load('checkpoints/claude_zero_wfail20500_rotvec.pth'))
@@ -225,7 +254,6 @@ wm.load_state_dict(torch.load('checkpoints/best_classifier.pth'))
 hdf5_file = '/data/ken/latent-unsafe/consolidated.h5'
 bs = 1
 bl= 10
-device = 'cuda:0'
 H = 3
 expert_data = SplitTrajectoryDataset(hdf5_file, 3, split='train', num_test=100)
 
@@ -451,11 +479,12 @@ if __name__ == "__main__":
         inputs2 = data['cam_rs_embd'][[0], :H].to(device)
         inputs1 = data['cam_zed_embd'][[0], :H].to(device)
         all_acs = data['action'][[0]].to(device)
-        all_acs = normalize_acs(all_acs, device=device)
+        all_acs = normalize_acs(all_acs, action_min, action_max)
         all_fails = data['failure'][[0]].to(device)
         acs = data['action'][[0],:H].to(device)
-        acs = normalize_acs(acs, device=device)
+        acs = normalize_acs(acs, action_min, action_max)
         states = data['state'][[0],:H].to(device)
+        states = normalize_states(states, state_min, state_max)
         im1s = (data['agentview_image'][[0], :H].squeeze().to(device)/255.).detach().cpu().numpy()
         im2s = (data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.).detach().cpu().numpy()
         
@@ -536,15 +565,17 @@ if __name__ == "__main__":
         inputs2 = data['cam_rs_embd'][[0], :H].to(device)
         inputs1 = data['cam_zed_embd'][[0], :H].to(device)
         all_acs = data['action'][[0]].to(device)
-        all_acs = normalize_acs(all_acs, device=device)
+        all_acs = normalize_acs(all_acs, action_min, action_max)
         all_states = data['state'][[0]].to(device)
+        all_states = normalize_states(all_states, state_min, state_max)
         all_in2s = data['cam_rs_embd'][[0]].squeeze().to(device)
         all_in1s = data['cam_zed_embd'][[0]].squeeze().to(device)
 
 
         acs = data['action'][[0],:H].to(device)
-        acs = normalize_acs(acs, device=device)
+        acs = normalize_acs(acs, action_min, action_max)
         states = data['state'][[0],:H].to(device)
+        states = normalize_states(states, state_min, state_max)
         im1s = (data['agentview_image'][[0], :H].squeeze().to(device)/255.).detach().cpu().numpy()
         im2s = (data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.).detach().cpu().numpy()
         pred_failures = []

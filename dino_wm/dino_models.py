@@ -257,9 +257,10 @@ class VideoTransformer(nn.Module):
         *,
         image_size: Tuple[int, int],
         dim: int,
-        ac_dim: int,
+        action_embed_dim: int,
+        state_embed_dim: int,
         state_dim: int,
-        action_dim: int, # New parameter for physical action dimension
+        action_dim: int, # Physical action dimension
         depth: int,
         heads: int,
         mlp_dim: int,
@@ -276,25 +277,25 @@ class VideoTransformer(nn.Module):
         
         # Improved action embedding
         self.action_encoder = nn.Sequential(
-            nn.Linear(action_dim, 128), # Uses dynamic dimension
+            nn.Linear(action_dim, 128), # Uses physical action dimension
             nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(128, ac_dim),
-            nn.LayerNorm(ac_dim)
+            nn.Linear(128, action_embed_dim),
+            nn.LayerNorm(action_embed_dim)
         ).to(device)
         
         # State encoder (matching action encoder architecture)
         self.state_encoder = nn.Sequential(
-            nn.Linear(state_dim, 128),
+            nn.Linear(state_dim, 128), # Uses physical state dimension
             nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(128, ac_dim),  # Match action embedding dimension for symmetry
-            nn.LayerNorm(ac_dim)
+            nn.Linear(128, state_embed_dim),
+            nn.LayerNorm(state_embed_dim)
         ).to(device)
         
-        total_dim = 2*dim + ac_dim + ac_dim  # Both actions and states use ac_dim embeddings
+        total_dim = 2*dim + action_embed_dim + state_embed_dim
         self.pos_embedding = nn.Parameter(torch.randn(1, 256, total_dim) * 0.02)
         self.temp_embedding = nn.Parameter(torch.randn(1, num_frames, total_dim) * 0.02)
         
