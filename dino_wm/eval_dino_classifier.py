@@ -82,7 +82,9 @@ from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from typing import Tuple, Optional
 from test_loader import SplitTrajectoryDataset
-from dino_models import Decoder, VideoTransformer, normalize_acs, batch_quat_to_rotvec, batch_rotvec_to_quat
+from dino_models import Decoder, VideoTransformer, normalize_acs, normalize_states, batch_quat_to_rotvec, batch_rotvec_to_quat
+import json
+import os
 
 def fail_loss(pred, fail_data):
     
@@ -136,6 +138,19 @@ if __name__ == "__main__":
     BS = 16
     BL= 4
     hdf5_file = '/data/ken/latent-unsafe-test/consolidated.h5'
+    
+    # Load state normalization stats
+    dataset_stats_path = 'dataset_stats.json'  # Update this path as needed
+    if os.path.exists(dataset_stats_path):
+        with open(dataset_stats_path, 'r') as f:
+            stats = json.load(f)
+        state_min = torch.tensor(stats['state_min']).float().to(device)
+        state_max = torch.tensor(stats['state_max']).float().to(device)
+        print(f"Loaded state normalization stats from {dataset_stats_path}")
+    else:
+        print(f"Warning: {dataset_stats_path} not found. States will not be normalized.")
+        state_min = None
+        state_max = None
 
     expert_data = SplitTrajectoryDataset(hdf5_file, BL, split='train', num_test=0)
 
@@ -153,6 +168,7 @@ if __name__ == "__main__":
         dim=384,  # DINO feature dimension
         ac_dim=10,  # Action embedding dimension
         state_dim=8,  # State dimension
+        action_dim=7,  # Physical action dimension (update if different)
         depth=6,
         heads=16,
         mlp_dim=2048,
@@ -185,8 +201,13 @@ if __name__ == "__main__":
     output2 = data2[:, 1:]
 
     data_state = data['state'].to(device)
-    states = data_state[:, :-1]
-    output_state = data_state[:, 1:]
+    if state_min is not None and state_max is not None:
+        norm_states = normalize_states(data_state, state_min, state_max)
+        states = norm_states[:, :-1]
+        output_state = norm_states[:, 1:]
+    else:
+        states = data_state[:, :-1]
+        output_state = data_state[:, 1:]
 
     data_acs = data['action'].to(device)
     acs = data_acs[:, :-1]
@@ -226,8 +247,13 @@ if __name__ == "__main__":
         output2 = data2[:, 1:]
 
         data_state = data['state'].to(device)
-        states = data_state[:, :-1]
-        output_state = data_state[:, 1:]
+        if state_min is not None and state_max is not None:
+            norm_eval_states = normalize_states(data_state, state_min, state_max)
+            states = norm_eval_states[:, :-1]
+            output_state = norm_eval_states[:, 1:]
+        else:
+            states = data_state[:, :-1]
+            output_state = data_state[:, 1:]
 
         data_acs = data['action'].to(device)
         acs = data_acs[:, :-1]

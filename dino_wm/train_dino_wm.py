@@ -30,7 +30,7 @@ from tqdm import tqdm
 
 from test_loader import SplitTrajectoryDataset
 from dino_decoder import VQVAE
-from dino_models import VideoTransformer, normalize_acs
+from dino_models import VideoTransformer, normalize_acs, normalize_states, unnormalize_states
 
 dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg')
 
@@ -90,12 +90,6 @@ def main():
         type=str,
         default="dino_decoder_checkpoints/testing_decoder.pth",
         help="Path to decoder checkpoint (default: dino_decoder_checkpoints/testing_decoder.pth).",
-    )
-    parser.add_argument(
-        "--state-dim",
-        type=int,
-        default=7,
-        help="State dimension (default: 7 for ARX5).",
     )
     parser.add_argument(
         "--sequence-length",
@@ -208,7 +202,7 @@ def main():
         stats = json.load(f)
     
     # Check for required keys
-    required_keys = ["action_min", "action_max"]
+    required_keys = ["action_min", "action_max", "state_min", "state_max"]
     missing_keys = [k for k in required_keys if k not in stats]
     
     if missing_keys:
@@ -217,6 +211,9 @@ def main():
     # Create tensors on device
     action_min = torch.tensor(stats['action_min']).float().to(device)
     action_max = torch.tensor(stats['action_max']).float().to(device)
+    state_min = torch.tensor(stats['state_min']).float().to(device)
+    state_max = torch.tensor(stats['state_max']).float().to(device)
+    state_dim = len(stats['state_min'])
 
     # Dataset setup
     hdf5_file = args.hdf5_file
@@ -252,7 +249,7 @@ def main():
         image_size=(224, 224),
         dim=384,  # DINO feature dimension
         ac_dim=10,  # Action embedding dimension (output of action encoder)
-        state_dim=args.state_dim,
+        state_dim=state_dim,
         action_dim=len(action_min),  # Infer physical action dim from stats
         depth=6,
         heads=16,
@@ -262,7 +259,7 @@ def main():
     ).to(device)
     transition.train()
     
-    print(f"Initialized VideoTransformer with state_dim={args.state_dim}")
+    print(f"Initialized VideoTransformer with state_dim={state_dim}")
 
     # Optimizer
     optimizer = AdamW([
@@ -271,6 +268,7 @@ def main():
         {'params': transition.front_head.parameters(), 'lr': 5e-5}, 
         {'params': transition.wrist_head.parameters(), 'lr': 5e-5}, 
         {'params': transition.action_encoder.parameters(), 'lr': 5e-4},
+        {'params': transition.state_encoder.parameters(), 'lr': 5e-4},
         {'params': [transition.pos_embedding], 'lr': 5e-4},
         {'params': [transition.temp_embedding], 'lr': 5e-4}
     ])
@@ -298,8 +296,9 @@ def main():
         output2 = data2[:, 1:]
 
         data_state = data['state'].to(device)
-        inputs_states = data_state[:, :-1]
-        output_state = data_state[:, 1:]
+        norm_states = normalize_states(data_state, state_min, state_max)
+        inputs_states = norm_states[:, :-1]
+        output_state = norm_states[:, 1:]
 
         data_acs = data['action'].to(device)
         norm_acs = normalize_acs(data_acs, action_min, action_max)
@@ -320,13 +319,13 @@ def main():
             detach_pred_state = pred_state.detach()
             inputs1_ar = torch.cat([data1[:, [0]], detach_pred1[:, [0]]], dim=1)
             inputs2_ar = torch.cat([data2[:, [0]], detach_pred2[:, [0]]], dim=1)
-            states_ar = torch.cat([data_state[:,[0]], detach_pred_state[:, [0]]], dim=1)
+            states_ar = torch.cat([norm_states[:,[0]], detach_pred_state[:, [0]]], dim=1)
             acs_ar = norm_acs[:, [0,1]]
 
             pred1_ar, pred2_ar, pred_state_ar, _ = transition(inputs1_ar, inputs2_ar, states_ar, acs_ar)
             output1_ar = data1[:, 2]
             output2_ar = data2[:, 2]
-            output_state_ar = data_state[:, 2]
+            output_state_ar = norm_states[:, 2]
             im1_loss_ar = nn.MSELoss()(pred1_ar[:,1], output1_ar)
             im2_loss_ar = nn.MSELoss()(pred2_ar[:,1], output2_ar)
             state_loss_ar = nn.MSELoss()(pred_state_ar[:,1], output_state_ar)
@@ -360,7 +359,8 @@ def main():
                 acs = eval_data['action'][[0],:H].to(device)
                 acs = normalize_acs(acs, action_min, action_max)
 
-                inputs_states = eval_data['state'][[0],:H].to(device)
+                eval_states = eval_data['state'][[0],:H].to(device)
+                inputs_states = normalize_states(eval_states, state_min, state_max)
                 # Resize images to 224x224 to match decoder output
                 im1s = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.  # (T, H, W, C)
                 im2s = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
@@ -382,7 +382,7 @@ def main():
                     acs = torch.cat([acs[[0], 1:], all_acs[0,H+k].unsqueeze(0).unsqueeze(0)], dim=1)
                     inputs1 = torch.cat([inputs1[[0], 1:], pred1[:, -1].unsqueeze(1)], dim=1)
                     inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
-                    states = torch.cat([inputs_states[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
+                    inputs_states = torch.cat([inputs_states[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
 
                 gt_im1 = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device)  # (T, H, W, C)
                 gt_im2 = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device)
@@ -411,8 +411,9 @@ def main():
                 output2 = data2[:, 1:]
 
                 data_state = eval_data['state'].to(device)
-                states = data_state[:, :-1]
-                output_state = data_state[:, 1:]
+                norm_eval_states = normalize_states(data_state, state_min, state_max)
+                states = norm_eval_states[:, :-1]
+                output_state = norm_eval_states[:, 1:]
 
                 data_acs = eval_data['action'].to(device)
                 data_acs = normalize_acs(data_acs, action_min, action_max)

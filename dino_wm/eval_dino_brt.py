@@ -210,6 +210,7 @@ wm = VideoTransformer(
         dim=384,  # DINO feature dimension
         ac_dim=10,  # Action embedding dimension
         state_dim=8,  # State dimension
+        action_dim=7,  # Physical action dimension (update if different)
         depth=6,
         heads=16,
         mlp_dim=2048,

@@ -10,7 +10,9 @@ from torch.utils.data import DataLoader
 from einops import rearrange
 from dino_decoder import VQVAE
 from test_loader import SplitTrajectoryDataset
-from dino_models import VideoTransformer, normalize_acs
+from dino_models import VideoTransformer, normalize_acs, normalize_states
+import json
+import os
 dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg')
 
 transform = transforms.Compose([           
@@ -80,6 +82,19 @@ if __name__ == "__main__":
 
     hdf5_file = '/data/ken/latent-labeled/consolidated.h5'
     hdf5_file_test = '/data/ken/latent-test-labeled/consolidated.h5'
+    
+    # Load state normalization stats
+    dataset_stats_path = 'dataset_stats.json'  # Update this path as needed
+    if os.path.exists(dataset_stats_path):
+        with open(dataset_stats_path, 'r') as f:
+            stats = json.load(f)
+        state_min = torch.tensor(stats['state_min']).float().to(device)
+        state_max = torch.tensor(stats['state_max']).float().to(device)
+        print(f"Loaded state normalization stats from {dataset_stats_path}")
+    else:
+        print(f"Warning: {dataset_stats_path} not found. States will not be normalized.")
+        state_min = None
+        state_max = None
 
     expert_data = SplitTrajectoryDataset(hdf5_file, BL, split='train', num_test=0)
     expert_data_eval = SplitTrajectoryDataset(hdf5_file_test, BL, split='test', num_test=5)
@@ -100,6 +115,7 @@ if __name__ == "__main__":
         dim=384,  # DINO feature dimension
         ac_dim=10,  # Action embedding dimension
         state_dim=8,  # State dimension
+        action_dim=7,  # Physical action dimension (update if different)
         depth=6,
         heads=16,
         mlp_dim=2048,
@@ -161,8 +177,13 @@ if __name__ == "__main__":
         output2 = data2[:, 1:]
 
         data_state = data['state'].to(device)
-        states = data_state[:, :-1]
-        output_state = data_state[:, 1:]
+        if state_min is not None and state_max is not None:
+            norm_states = normalize_states(data_state, state_min, state_max)
+            states = norm_states[:, :-1]
+            output_state = norm_states[:, 1:]
+        else:
+            states = data_state[:, :-1]
+            output_state = data_state[:, 1:]
 
         data_acs = data['action'].to(device)
         acs = data_acs[:, :-1]
@@ -196,7 +217,11 @@ if __name__ == "__main__":
                 all_acs = normalize_acs(all_acs, device)
                 acs = eval_data['action'][[0],:H].to(device)
                 acs = normalize_acs(acs, device)
-                states = eval_data['state'][[0],:H].to(device)
+                eval_states = eval_data['state'][[0],:H].to(device)
+                if state_min is not None and state_max is not None:
+                    states = normalize_states(eval_states, state_min, state_max)
+                else:
+                    states = eval_states
                 im1s = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.
                 im2s = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
                 for k in range(EVAL_H-H):
@@ -263,8 +288,13 @@ if __name__ == "__main__":
                 output2 = data2[:, 1:]
 
                 data_state = eval_data['state'].to(device)
-                states = data_state[:, :-1]
-                output_state = data_state[:, 1:]
+                if state_min is not None and state_max is not None:
+                    norm_eval_states = normalize_states(data_state, state_min, state_max)
+                    states = norm_eval_states[:, :-1]
+                    output_state = norm_eval_states[:, 1:]
+                else:
+                    states = data_state[:, :-1]
+                    output_state = data_state[:, 1:]
 
                 data_acs = eval_data['action'].to(device)
                 acs = data_acs[:, :-1]

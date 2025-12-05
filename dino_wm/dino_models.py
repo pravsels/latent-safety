@@ -70,6 +70,26 @@ def unnormalize_acs(acs, min_ac, max_ac):
     
     return acs
 
+def normalize_states(states, min_state, max_state):
+    if min_state.device != states.device:
+        min_state = min_state.to(states.device)
+    if max_state.device != states.device:
+        max_state = max_state.to(states.device)
+        
+    norm_states = (states - min_state) / (max_state - min_state)
+    
+    return norm_states
+
+def unnormalize_states(states, min_state, max_state):
+    if min_state.device != states.device:
+        min_state = min_state.to(states.device)
+    if max_state.device != states.device:
+        max_state = max_state.to(states.device)
+    
+    states = (states * (max_state - min_state)) + min_state
+    
+    return states
+
 class ResidualBlock2(nn.Module):
     def __init__(self, channels):
         super(ResidualBlock2, self).__init__()
@@ -264,7 +284,17 @@ class VideoTransformer(nn.Module):
             nn.LayerNorm(ac_dim)
         ).to(device)
         
-        total_dim = 2*dim + ac_dim + state_dim
+        # State encoder (matching action encoder architecture)
+        self.state_encoder = nn.Sequential(
+            nn.Linear(state_dim, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(128, ac_dim),  # Match action embedding dimension for symmetry
+            nn.LayerNorm(ac_dim)
+        ).to(device)
+        
+        total_dim = 2*dim + ac_dim + ac_dim  # Both actions and states use ac_dim embeddings
         self.pos_embedding = nn.Parameter(torch.randn(1, 256, total_dim) * 0.02)
         self.temp_embedding = nn.Parameter(torch.randn(1, num_frames, total_dim) * 0.02)
         
@@ -333,9 +363,9 @@ class VideoTransformer(nn.Module):
         states: torch.Tensor,
         actions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Encode actions
+        # Encode actions and states
         action_embeddings = self.action_encoder(actions).unsqueeze(2).expand(-1, -1, 256, -1)
-        state_embeddings = states.unsqueeze(2).expand(-1, -1, 256, -1)
+        state_embeddings = self.state_encoder(states).unsqueeze(2).expand(-1, -1, 256, -1)
         
         # Combine features
         batch_size, num_frames, _, _ = video1.shape
