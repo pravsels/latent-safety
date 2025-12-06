@@ -223,9 +223,9 @@ def main():
         
         pred1, pred2 = torch.split(pred, [inputs1.shape[0], inputs2.shape[0]], dim=0)
         # Drop only the time dim, keep batch dim: (B, 1, C, H, W) -> (B, C, H, W)
-        pred1 = pred1.squeeze(1).permute(0, 2, 3, 1)  # (B, H, W, C)
+        pred1 = pred1.squeeze(1).permute(0, 2, 3, 1)  # (B, C, H, W) -> (B, H, W, C)
         pred2 = pred2.squeeze(1).permute(0, 2, 3, 1)
-        # output1, output2: (B, T, H, W, C) -> drop time dim only
+        # output1, output2: (B, T, H, W, C) -> (B, H, W, C)
         output1_bhwc = output1.squeeze(1)
         output2_bhwc = output2.squeeze(1)
 

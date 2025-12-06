@@ -8,7 +8,10 @@ Quickstart:
 
 With custom parameters:
 
-  python dino_wm/train_dino_wm.py --hdf5-file arx5_subset_train.h5 --batch-size 128 
+  python dino_wm/train_dino_wm.py \
+    --hdf5-file arx5_subset_train.h5 \
+    --resume-checkpoint dino_wm_checkpoints/wm_iter5000.pth \
+    --start-iter 5000 --batch-size 128
 """
 
 import argparse
@@ -164,6 +167,18 @@ def main():
         default="dataset_stats.json",
         help="Path to dataset statistics JSON file.",
     )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=str,
+        default=None,
+        help="Path to a checkpoint to resume training from.",
+    )
+    parser.add_argument(
+        "--start-iter",
+        type=int,
+        default=0,
+        help="Iteration to start training from (default: 0).",
+    )
     args = parser.parse_args()
 
     # Initialize wandb
@@ -264,6 +279,11 @@ def main():
         num_frames=BL-1,
         dropout=0.1
     ).to(device)
+    
+    if args.resume_checkpoint is not None:
+        print(f"Resuming from checkpoint: {args.resume_checkpoint}")
+        transition.load_state_dict(torch.load(args.resume_checkpoint, map_location=device))
+    
     transition.train()
 
     # Optimizer
@@ -281,8 +301,9 @@ def main():
     best_eval = float('inf')
     iters = []
     train_iter = args.train_iters
+    start_iter = args.start_iter
 
-    for i in tqdm(range(train_iter), desc="Training", unit="iter"):
+    for i in tqdm(range(start_iter, train_iter), desc="Training", unit="iter"):
         if i % len(expert_loader) == 0:
             expert_loader = iter(DataLoader(expert_data, batch_size=BS, shuffle=True))
         if i % len(expert_loader_eval) == 0:
