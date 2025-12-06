@@ -12,8 +12,7 @@ HuggingFace Upload:
 Usage:
     python scripts/create_subset_dataset.py \
         --input arx5_datasets.h5 \
-        --output-prefix arx5_subset_train \
-        --num-trajectories 100
+        --output-prefix arx5_subset_train 
         
     # Creates: arx5_subset_train.h5 and arx5_subset_eval.h5
 """
@@ -89,7 +88,10 @@ def create_stratified_subset(
         
         # Determine how many trajectories to select
         all_traj_keys = [k for k in src.keys() if k.startswith("trajectory_")]
-        target_traj = min(num_trajectories, len(all_traj_keys))
+        if num_trajectories is None:
+            target_traj = len(all_traj_keys)
+        else:
+            target_traj = min(num_trajectories, len(all_traj_keys))
         print(f"\n📊 Target: {target_traj} trajectories")
         
         print(f"   Split: {(1-eval_fraction)*100:.0f}% train / {eval_fraction*100:.0f}% eval")
@@ -161,7 +163,7 @@ def main():
     parser = argparse.ArgumentParser(description="Create stratified train/eval subsets of ARX5 dataset")
     parser.add_argument("--input", type=str, required=True, help="Input HDF5 file")
     parser.add_argument("--output-prefix", type=str, default="arx5_subset", help="Output prefix (creates _train.h5 and _eval.h5)")
-    parser.add_argument("--num-trajectories", type=int, required=True, help="Number of trajectories to select")
+    parser.add_argument("--num-trajectories", type=int, default=None, help="Number of trajectories to select (default: all)")
     parser.add_argument("--eval-fraction", type=float, default=0.1, help="Fraction for eval (default: 0.1 = 10%%)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     

@@ -6,12 +6,6 @@ Downloads chunks one at a time, batches trajectories in memory, then writes to d
 Automatically resumes from existing output file if present.
 
 Usage:
-    # With larger memory budget for faster batching:
-    python scripts/chunked_download_from_hf.py \
-        --repo-id pravsels/arx5-robot-dataset \
-        --output arx5_dataset.h5 \
-        --max-memory-gb 100
-
     # Start fresh (overwrite existing):
     python scripts/chunked_download_from_hf.py \
         --repo-id pravsels/arx5-robot-dataset \
