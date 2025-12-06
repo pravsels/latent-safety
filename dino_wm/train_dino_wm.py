@@ -197,7 +197,7 @@ def main():
     np.random.seed(args.seed)
 
     use_amp = True
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.cuda.amp.GradScaler('cuda', enabled=use_amp)
 
     BS = args.batch_size
     BL = args.sequence_length

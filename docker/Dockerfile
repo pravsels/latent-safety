@@ -31,7 +31,7 @@ WORKDIR /workspace
 
 # Install PyTorch explicitly
 RUN set -eux; \
-    python -m pip install -v torch==2.6 --index-url https://download.pytorch.org/whl/cu126 && \
+    python -m pip install -v torch==2.6 torchvision --index-url https://download.pytorch.org/whl/cu126 && \
     python -m pip install -v wandb
 
 COPY . .
