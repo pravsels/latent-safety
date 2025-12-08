@@ -200,6 +200,11 @@ class MultiHeadAttention(nn.Module):
         self.register_buffer("mask", mask)
         
     def _create_causal_mask(self, num_frames: int, patches_per_frame: int) -> torch.Tensor:
+        """Create causal attention mask for autoregressive prediction.
+        
+        Each frame can attend to itself and all previous frames, but not future frames.
+        This enables: position t (seeing frames 0..t) predicts frame t+1.
+        """
         total_patches = num_frames * patches_per_frame
         mask = torch.zeros(total_patches, total_patches)
         
@@ -285,7 +290,7 @@ class VideoTransformer(nn.Module):
             nn.LayerNorm(action_embed_dim)
         ).to(device)
         
-        # State encoder (matching action encoder architecture)
+        # State encoder 
         self.state_encoder = nn.Sequential(
             nn.Linear(state_dim, 128), # Uses physical state dimension
             nn.LayerNorm(128),
@@ -296,8 +301,8 @@ class VideoTransformer(nn.Module):
         ).to(device)
         
         total_dim = 2*dim + action_embed_dim + state_embed_dim
-        self.pos_embedding = nn.Parameter(torch.randn(1, 256, total_dim) * 0.02)
-        self.temp_embedding = nn.Parameter(torch.randn(1, num_frames, total_dim) * 0.02)
+        self.pos_embedding = nn.Parameter(torch.randn(1, 256, total_dim) * 0.02)  # Spatial: patch position within frame
+        self.temp_embedding = nn.Parameter(torch.randn(1, num_frames, total_dim) * 0.02)  # Temporal: frame position in sequence
         
         self.dropout = nn.Dropout(emb_dropout)
         
@@ -372,9 +377,9 @@ class VideoTransformer(nn.Module):
         batch_size, num_frames, _, _ = video1.shape
     
         x = torch.cat((video1, video2, action_embeddings, state_embeddings), dim=3)
-        # Add positional embeddings
-        x = x + self.pos_embedding
-        x = x + self.temp_embedding[:, :num_frames].unsqueeze(2)
+        # Add positional embeddings: spatial (per-patch) + temporal (per-frame)
+        x = x + self.pos_embedding  # Same patch positions applied to all frames
+        x = x + self.temp_embedding[:, :num_frames].unsqueeze(2)  # Same frame position applied to all patches
 
         # Reshape for transformer
         x = rearrange(x, 'b s n d -> b (s n) d')
@@ -389,13 +394,15 @@ class VideoTransformer(nn.Module):
         return x
 
     def failure_pred(self, features):
-        failure_preds = self.failure_head(features)
-        failure_preds = torch.mean(failure_preds, dim=2)  # Average over patches
+        # features: (batch, num_frames, num_patches, dim)
+        failure_preds = self.failure_head(features)  # (batch, num_frames, num_patches, 1)
+        failure_preds = torch.mean(failure_preds, dim=2)  # Average over patches -> (batch, num_frames, 1)
         return failure_preds
     
     def state_pred(self, features):
-        state_preds = self.state_head(features)
-        state_preds = torch.mean(state_preds, dim=2)  # Average over patches
+        # features: (batch, num_frames, num_patches, dim)
+        state_preds = self.state_head(features)  # (batch, num_frames, num_patches, state_dim)
+        state_preds = torch.mean(state_preds, dim=2)  # Average over patches -> (batch, num_frames, state_dim)
         return state_preds
 
 

@@ -130,15 +130,15 @@ if __name__ == "__main__":
 
     transition = VideoTransformer(
         image_size=(224, 224),
-        dim=384,  # DINO feature dimension
-        action_embed_dim=10,  # Action embedding dimension
-        state_embed_dim=10,  # State embedding dimension
-        state_dim=state_dim,  # Inferred from dataset stats
+        dim=384,                # DINO feature dimension
+        action_embed_dim=10,    # Action embedding dimension
+        state_embed_dim=10,     # State embedding dimension
+        state_dim=state_dim,    # Inferred from dataset stats
         action_dim=action_dim,  # Inferred from dataset stats
-        depth=6,
-        heads=16,
-        mlp_dim=2048,
-        num_frames=BL-1,
+        depth=6,                # no of transformer blocks 
+        heads=16,               # no of attention heads per block
+        mlp_dim=2048,           # hidden dimension of feedforward network after attention
+        num_frames=BL-1,        # context window size (input sequence length)
         dropout=0.1
     ).to(device)
     transition.load_state_dict(torch.load('checkpoints/best_testing.pth'))
@@ -148,7 +148,7 @@ if __name__ == "__main__":
 
     data = next(expert_loader)
     
-
+    
     data1 = data['cam_zed_embd'].to(device)
     data2 =  data['cam_rs_embd'].to(device)
     inputs1 = data1[:, :-1]

@@ -268,16 +268,16 @@ def main():
     # Initialize world model
     transition = VideoTransformer(
         image_size=(224, 224),
-        dim=384,  # DINO feature dimension
-        action_embed_dim=10,  # Action embedding dimension
-        state_embed_dim=10,  # State embedding dimension
-        state_dim=state_dim,  # Inferred from dataset stats
+        dim=384,                # DINO feature dimension
+        action_embed_dim=10,    # Action embedding dimension
+        state_embed_dim=10,     # State embedding dimension
+        state_dim=state_dim,    # Inferred from dataset stats
         action_dim=action_dim,  # Inferred from dataset stats
-        depth=6,
-        heads=16,
-        mlp_dim=2048,
-        num_frames=BL-1,
-        dropout=0.1
+        depth=6,                # no of transformer blocks 
+        heads=16,               # no of attention heads per block
+        mlp_dim=2048,           # hidden dimension of feedforward network after attention
+        num_frames=BL-1,        # context window size (input sequence length)
+        dropout=0.1             
     ).to(device)
     
     if args.resume_checkpoint is not None:
@@ -285,7 +285,7 @@ def main():
         transition.load_state_dict(torch.load(args.resume_checkpoint, map_location=device))
     
     transition.train()
-
+    
     # Optimizer
     optimizer = AdamW([
         {'params': transition.transformer.parameters(), 'lr': 5e-5},
