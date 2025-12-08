@@ -6,6 +6,7 @@ import sys
 sys.path.append('..')
 #import distributed_fn as dist_fn
 from einops import rearrange
+from torchvision import transforms
 
 # Copyright 2018 The Sonnet Authors. All Rights Reserved.
 #
@@ -212,8 +213,9 @@ class VQVAE(nn.Module):
         diff_b = diff_b.unsqueeze(0)
         dec = self.decode(quant_b)
 
-        # Resize to 224x224 using pure PyTorch (avoid torchvision dependency).
-        dec = F.interpolate(dec, size=(224, 224), mode="bilinear", align_corners=False)
+        # dec = F.interpolate(dec, size=(224, 224), mode="bilinear", align_corners=False)
+        dec = transforms.Resize(224)(dec)
+        
         return dec, diff_b  # diff is 0 if no quantization
 
     def decode(self, quant_b):
