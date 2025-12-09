@@ -313,49 +313,62 @@ def main():
 
         data = next(expert_loader)
 
-        data1 = data['cam_zed_embd'].to(device)
-        inputs1 = data1[:, :-1]
-        output1 = data1[:, 1:]
+        gt_front_embd = data['cam_zed_embd'].to(device)
+        
+        # Teacher Forcing Setup:
+        # Input:  Frames [0, 1, ..., N-1]
+        # Target: Frames [1, 2, ..., N]
+        # The model predicts t+1 given history up to t.
+        input_front_embd = gt_front_embd[:, :-1]
+        target_front_embd = gt_front_embd[:, 1:]
 
-        data2 = data['cam_rs_embd'].to(device)
-        inputs2 = data2[:, :-1]
-        output2 = data2[:, 1:]
+        gt_wrist_embd = data['cam_rs_embd'].to(device)
+        input_wrist_embd = gt_wrist_embd[:, :-1]
+        target_wrist_embd = gt_wrist_embd[:, 1:]
 
-        data_state = data['state'].to(device)
-        norm_states = normalize_states(data_state, state_min, state_max)
-        inputs_states = norm_states[:, :-1]
-        output_state = norm_states[:, 1:]
+        gt_state = data['state'].to(device)
+        norm_gt_state = normalize_states(gt_state, state_min, state_max)
+        input_state = norm_gt_state[:, :-1]
+        target_state = norm_gt_state[:, 1:]
 
-        data_acs = data['action'].to(device)
-        norm_acs = normalize_acs(data_acs, action_min, action_max)
-        acs = norm_acs[:, :-1]
+        gt_acs = data['action'].to(device)
+        norm_gt_acs = normalize_acs(gt_acs, action_min, action_max)
+        input_acs = norm_gt_acs[:, :-1]
 
         optimizer.zero_grad()
 
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            pred1, pred2, pred_state, _ = transition(inputs1, inputs2, inputs_states, acs)
-            im1_loss_tf = nn.MSELoss()(pred1, output1)
-            im2_loss_tf = nn.MSELoss()(pred2, output2)
-            state_loss_tf = nn.MSELoss()(pred_state, output_state)
-            loss_tf = im1_loss_tf + im2_loss_tf + state_loss_tf
+            pred_front, pred_wrist, pred_state, _ = transition(input_front_embd, input_wrist_embd, input_state, input_acs)
+            loss_front_tf = nn.MSELoss()(pred_front, target_front_embd)
+            loss_wrist_tf = nn.MSELoss()(pred_wrist, target_wrist_embd)
+            loss_state_tf = nn.MSELoss()(pred_state, target_state)
+            loss_tf = loss_front_tf + loss_wrist_tf + loss_state_tf
 
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            detach_pred1 = pred1
-            detach_pred2 = pred2
+            # Detach predictions for AR step
+            detach_pred_front = pred_front
+            detach_pred_wrist = pred_wrist
             detach_pred_state = pred_state.detach()
-            inputs1_ar = torch.cat([data1[:, [0]], detach_pred1[:, [0]]], dim=1)
-            inputs2_ar = torch.cat([data2[:, [0]], detach_pred2[:, [0]]], dim=1)
-            states_ar = torch.cat([norm_states[:,[0]], detach_pred_state[:, [0]]], dim=1)
-            acs_ar = norm_acs[:, [0,1]]
+            
+            # Create hybrid AR inputs: [GT_0, Pred_1]
+            input_front_ar = torch.cat([gt_front_embd[:, [0]], detach_pred_front[:, [0]]], dim=1)
+            input_wrist_ar = torch.cat([gt_wrist_embd[:, [0]], detach_pred_wrist[:, [0]]], dim=1)
+            input_state_ar = torch.cat([norm_gt_state[:,[0]], detach_pred_state[:, [0]]], dim=1)
+            input_acs_ar = norm_gt_acs[:, [0,1]]
 
-            pred1_ar, pred2_ar, pred_state_ar, _ = transition(inputs1_ar, inputs2_ar, states_ar, acs_ar)
-            output1_ar = data1[:, 2]
-            output2_ar = data2[:, 2]
-            output_state_ar = norm_states[:, 2]
-            im1_loss_ar = nn.MSELoss()(pred1_ar[:,1], output1_ar)
-            im2_loss_ar = nn.MSELoss()(pred2_ar[:,1], output2_ar)
-            state_loss_ar = nn.MSELoss()(pred_state_ar[:,1], output_state_ar)
-            loss_ar = im1_loss_ar + im2_loss_ar + state_loss_ar       
+            # AR Forward pass
+            pred_front_ar, pred_wrist_ar, pred_state_ar, _ = transition(input_front_ar, input_wrist_ar, input_state_ar, input_acs_ar)
+            
+            # Targets for AR step: Frame 2 (index 2 in GT)
+            target_front_ar = gt_front_embd[:, 2]
+            target_wrist_ar = gt_wrist_embd[:, 2]
+            target_state_ar = norm_gt_state[:, 2]
+            
+            # Calculate AR losses on the second step of prediction (corresponding to Frame 2)
+            loss_front_ar = nn.MSELoss()(pred_front_ar[:,1], target_front_ar)
+            loss_wrist_ar = nn.MSELoss()(pred_wrist_ar[:,1], target_wrist_ar)
+            loss_state_ar = nn.MSELoss()(pred_state_ar[:,1], target_state_ar)
+            loss_ar = loss_front_ar + loss_wrist_ar + loss_state_ar       
 
         loss = loss_tf + loss_ar*0.5
 
@@ -363,7 +376,7 @@ def main():
         scaler.step(optimizer)
         scaler.update()
         train_loss = loss.item()
-        print(f"\rIter {i}, TF Loss: {loss_tf:.4f}, AR loss:{loss_ar:.4f}, front Loss: {im1_loss_tf.item():.4f}, wrist Loss: {im2_loss_tf.item():.4f}, state Loss: {state_loss_tf.item():.4f}", end='', flush=True)
+        print(f"\rIter {i}, TF Loss: {loss_tf:.4f}, AR loss:{loss_ar:.4f}, front Loss: {loss_front_tf.item():.4f}, wrist Loss: {loss_wrist_tf.item():.4f}, state Loss: {loss_state_tf.item():.4f}", end='', flush=True)
         wandb.log({'train_loss': loss_tf, "train_loss_ar": loss_ar})
         
         # Evaluation
@@ -372,11 +385,11 @@ def main():
             eval_data = next(expert_loader_imagine)
             transition.eval()
             with torch.no_grad():
-                eval_data1 = eval_data['cam_zed_embd'].to(device)
-                inputs1 = eval_data1[[0], :H].to(device)
+                gt_front_embd_eval = eval_data['cam_zed_embd'].to(device)
+                input_front_embd_eval = gt_front_embd_eval[[0], :H].to(device)
 
-                eval_data2 = eval_data['cam_rs_embd'].to(device)
-                inputs2 = eval_data2[[0], :H].to(device)
+                gt_wrist_embd_eval = eval_data['cam_rs_embd'].to(device)
+                input_wrist_embd_eval = gt_wrist_embd_eval[[0], :H].to(device)
                 
                 all_acs = eval_data['action'][[0]].to(device)
                 all_acs = normalize_acs(all_acs, action_min, action_max)
@@ -384,30 +397,30 @@ def main():
                 acs = eval_data['action'][[0],:H].to(device)
                 acs = normalize_acs(acs, action_min, action_max)
 
-                eval_states = eval_data['state'][[0],:H].to(device)
-                inputs_states = normalize_states(eval_states, state_min, state_max)
+                gt_states_eval = eval_data['state'][[0],:H].to(device)
+                input_states_eval = normalize_states(gt_states_eval, state_min, state_max)
                 # Resize images to 224x224 to match decoder output
                 im1s = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.  # (T, H, W, C)
                 im2s = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
                 im1s = F.interpolate(im1s.permute(0, 3, 1, 2), size=(224, 224), mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
                 im2s = F.interpolate(im2s.permute(0, 3, 1, 2), size=(224, 224), mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
                 for k in range(EVAL_H-H):
-                    pred1, pred2, pred_state, _ = transition(inputs1, inputs2, inputs_states, acs)
+                    pred_front, pred_wrist, pred_state, _ = transition(input_front_embd_eval, input_wrist_embd_eval, input_states_eval, acs)
 
-                    pred_latent = torch.cat([pred1[:,[-1]], pred2[:,[-1]]], dim=0)
+                    pred_latent = torch.cat([pred_front[:,[-1]], pred_wrist[:,[-1]]], dim=0)
                     pred_ims, _ = decoder(pred_latent)
 
                     pred_ims = rearrange(pred_ims, "(b t) c h w -> b t h w c", t=1)
-                    pred_im1, pred_im2 = torch.split(pred_ims, [inputs1.shape[0], inputs2.shape[0]], dim=0)
+                    pred_im1, pred_im2 = torch.split(pred_ims, [input_front_embd_eval.shape[0], input_wrist_embd_eval.shape[0]], dim=0)
 
                     im1s = torch.cat([im1s, pred_im1.squeeze(0)], dim=0)
                     im2s = torch.cat([im2s, pred_im2.squeeze(0)], dim=0)
                     
                     # getting next inputs
                     acs = torch.cat([acs[[0], 1:], all_acs[0,H+k].unsqueeze(0).unsqueeze(0)], dim=1)
-                    inputs1 = torch.cat([inputs1[[0], 1:], pred1[:, -1].unsqueeze(1)], dim=1)
-                    inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
-                    inputs_states = torch.cat([inputs_states[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
+                    input_front_embd_eval = torch.cat([input_front_embd_eval[[0], 1:], pred_front[:, -1].unsqueeze(1)], dim=1)
+                    input_wrist_embd_eval = torch.cat([input_wrist_embd_eval[[0], 1:], pred_wrist[:, -1].unsqueeze(1)], dim=1)
+                    input_states_eval = torch.cat([input_states_eval[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
 
                 gt_im1 = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device)  # (T, H, W, C)
                 gt_im2 = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device)
@@ -426,38 +439,38 @@ def main():
                 # done logging video
 
                 eval_data = next(expert_loader_eval)
-                data1 = eval_data['cam_zed_embd'].to(device)
-                data2 = eval_data['cam_rs_embd'].to(device)
+                gt_front_embd_eval = eval_data['cam_zed_embd'].to(device)
+                gt_wrist_embd_eval = eval_data['cam_rs_embd'].to(device)
 
-                inputs1 = data1[:, :-1]
-                output1 = data1[:, 1:]
+                input_front_embd_eval = gt_front_embd_eval[:, :-1]
+                target_front_embd_eval = gt_front_embd_eval[:, 1:]
 
-                inputs2 = data2[:, :-1]
-                output2 = data2[:, 1:]
+                input_wrist_embd_eval = gt_wrist_embd_eval[:, :-1]
+                target_wrist_embd_eval = gt_wrist_embd_eval[:, 1:]
 
-                data_state = eval_data['state'].to(device)
-                norm_eval_states = normalize_states(data_state, state_min, state_max)
-                states = norm_eval_states[:, :-1]
-                output_state = norm_eval_states[:, 1:]
+                gt_state_eval = eval_data['state'].to(device)
+                norm_eval_states = normalize_states(gt_state_eval, state_min, state_max)
+                input_state_eval = norm_eval_states[:, :-1]
+                target_state_eval = norm_eval_states[:, 1:]
 
                 data_acs = eval_data['action'].to(device)
-                data_acs = normalize_acs(data_acs, action_min, action_max)
-                acs = data_acs[:, :-1]
-                pred1, pred2, pred_state, _ = transition(inputs1, inputs2, states, acs)
+                norm_acs = normalize_acs(data_acs, action_min, action_max)
+                acs = norm_acs[:, :-1]
+                pred_front, pred_wrist, pred_state, _ = transition(input_front_embd_eval, input_wrist_embd_eval, input_state_eval, acs)
 
-                pred_latent = torch.cat([pred1[:,[H-1]], pred2[:,[H-1]]], dim=0)
+                pred_latent = torch.cat([pred_front[:,[H-1]], pred_wrist[:,[H-1]]], dim=0)
                 pred_ims, _ = decoder(pred_latent)
-                pred_im1, pred_im2 = torch.split(pred_ims, [inputs1.shape[0], inputs2.shape[0]], dim=0)
+                pred_im1, pred_im2 = torch.split(pred_ims, [input_front_embd_eval.shape[0], input_wrist_embd_eval.shape[0]], dim=0)
                 pred_im1 = pred_im1[0].permute(1,2,0).detach().cpu().numpy()
                 pred_im2 = pred_im2[0].permute(1,2,0).detach().cpu().numpy()
                 im1 = eval_data['agentview_image'][0, H].numpy()
                 im2 = eval_data['robot0_eye_in_hand_image'][0, H].numpy()
-                im1_loss = nn.MSELoss()(pred1, output1)
-                im2_loss = nn.MSELoss()(pred2, output2)
-                state_loss = nn.MSELoss()(pred_state, output_state)
-                loss = im1_loss + im2_loss + state_loss
+                loss_front = nn.MSELoss()(pred_front, target_front_embd_eval)
+                loss_wrist = nn.MSELoss()(pred_wrist, target_wrist_embd_eval)
+                loss_state = nn.MSELoss()(pred_state, target_state_eval)
+                loss = loss_front + loss_wrist + loss_state
             print()
-            print(f"\rIter {i}, Eval Loss: {loss.item():.4f}, front Loss: {im1_loss.item():.4f}, wrist Loss: {im2_loss.item():.4f}, state Loss: {state_loss.item():.4f}")
+            print(f"\rIter {i}, Eval Loss: {loss.item():.4f}, front Loss: {loss_front.item():.4f}, wrist Loss: {loss_wrist.item():.4f}, state Loss: {loss_state.item():.4f}")
 
             os.makedirs(args.checkpoint_dir, exist_ok=True)
             torch.save(transition.state_dict(), os.path.join(args.checkpoint_dir, f'wm_iter{i}.pth'))
@@ -467,7 +480,7 @@ def main():
                 torch.save(transition.state_dict(), os.path.join(args.checkpoint_dir, 'best_wm.pth'))
             
             transition.train()
-            wandb.log({'eval_loss': loss.item(), 'front_loss': im1_loss.item(), 'wrist_loss': im2_loss.item(), 'state_loss': state_loss.item(), 'pred_front': wandb.Image(pred_im1), 'pred_wrist': wandb.Image(pred_im2), 'front': wandb.Image(im1), 'wrist': wandb.Image(im2)})
+            wandb.log({'eval_loss': loss.item(), 'front_loss': loss_front.item(), 'wrist_loss': loss_wrist.item(), 'state_loss': loss_state.item(), 'pred_front': wandb.Image(pred_im1), 'pred_wrist': wandb.Image(pred_im2), 'front': wandb.Image(im1), 'wrist': wandb.Image(im2)})
 
     plt.legend()
     plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
