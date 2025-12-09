@@ -254,12 +254,12 @@ class TrajectoryLabeler:
         cv2.rectangle(vis, (0, 0), (w, 30), (0, 0, 0), -1)
         
         # Left: Trajectory
-        traj_info = f"{self.session.current_traj_idx + 1}/{self.num_trajectories}"
+        traj_info = f"Traj: {self.session.current_traj_idx + 1}/{self.num_trajectories}"
         cv2.putText(vis, traj_info, (10, 20), FONT, 0.5, COLOR_TEXT, 1)
         
         # Center: Frame
-        frame_info = f"{self.current_frame + 1}/{self.total_frames}"
-        cv2.putText(vis, frame_info, (w//2 - 40, 20), FONT, 0.5, COLOR_TEXT, 1)
+        frame_info = f"Frame: {self.current_frame + 1}/{self.total_frames}"
+        cv2.putText(vis, frame_info, (w//2 - 60, 20), FONT, 0.5, status_color, 1)
         
         # Right: Status
         cv2.putText(vis, status_text, (w - 120, 20), FONT, 0.5, status_color, 1)
@@ -301,11 +301,33 @@ class TrajectoryLabeler:
 
         return vis
 
+    def show_loading_message(self, idx: int):
+        vis = self.render()
+        h, w = vis.shape[:2]
+        
+        # Darken background
+        overlay = vis.copy()
+        cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, vis, 0.3, 0, vis)
+        
+        # Text
+        text = f"Loading Trajectory {idx + 1}/{self.num_trajectories}..."
+        font_scale = 1.0
+        thickness = 2
+        (text_w, text_h), _ = cv2.getTextSize(text, FONT, font_scale, thickness)
+        
+        x = (w - text_w) // 2
+        y = (h + text_h) // 2
+        
+        cv2.putText(vis, text, (x, y), FONT, font_scale, (255, 255, 255), thickness)
+        cv2.imshow(WINDOW_NAME, vis)
+        cv2.waitKey(1)
+
     def run(self):
         print("\n=== Controls ===")
         print("SPACE      : Play/Pause")
         print("LEFT/RIGHT : Prev/Next frame")
-        print("UP/DOWN    : Prev/Next trajectory")
+        print("UP/DOWN    : Next/Prev trajectory")
         print("U          : Toggle Unsafe Region (Start... End)")
         print("W          : Toggle Weak Unsafe Region (Start... End)")
         print("Z          : Undo")
@@ -354,12 +376,18 @@ class TrajectoryLabeler:
                 else:
                     self.current_frame = min(self.total_frames - 1, self.current_frame + step)
                     
-            elif key == 82: # Up arrow (Prev Traj)
-                self.save_labels()
-                self.load_trajectory(self.session.current_traj_idx - 1)
-            elif key == 84 or key == ord('s'): # Down arrow or 's' (Next Traj)
-                self.save_labels()
-                self.load_trajectory(self.session.current_traj_idx + 1)
+            elif key == 82: # Up arrow (Next Traj)
+                next_idx = self.session.current_traj_idx + 1
+                if next_idx < self.num_trajectories:
+                    self.show_loading_message(next_idx)
+                    self.save_labels()
+                    self.load_trajectory(next_idx)
+            elif key == 84 or key == ord('s'): # Down arrow or 's' (Prev Traj)
+                next_idx = self.session.current_traj_idx - 1
+                if next_idx >= 0:
+                    self.show_loading_message(next_idx)
+                    self.save_labels()
+                    self.load_trajectory(next_idx)
             elif key == ord('u'):
                 self.toggle_unsafe_region()
             elif key == ord('w'):
