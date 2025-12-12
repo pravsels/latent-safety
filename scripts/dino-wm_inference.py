@@ -200,8 +200,18 @@ def main():
                        help="State dimension (default: 7 for ARX5)")
     parser.add_argument("--action-dim", type=int, default=None,
                        help="Action dimension (default: infer from dataset)")
+    parser.add_argument("--seed", type=int, default=None,
+                       help="Random seed for trajectory selection. Use the same seed for different checkpoints to ensure same trajectories are used for comparison (default: None, random)")
     
     args = parser.parse_args()
+    
+    # Set random seed for reproducibility
+    if args.seed is not None:
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        import random
+        random.seed(args.seed)
+        print(f"Using random seed: {args.seed} (for reproducible trajectory selection)")
     
     device = args.device
     
@@ -244,14 +254,49 @@ def main():
         split='test',
         num_test=100  # Use test split
     )
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
+    # Select trajectory indices deterministically if seed is set
+    if args.seed is not None:
+        # Use seed to deterministically select trajectory indices
+        np.random.seed(args.seed)
+        num_trajectories = len(dataset)
+        # Select random but deterministic indices (without replacement)
+        if args.num_rollouts <= num_trajectories:
+            trajectory_indices = np.random.choice(num_trajectories, size=args.num_rollouts, replace=False)
+        else:
+            # If we need more rollouts than trajectories, allow replacement but still deterministic
+            trajectory_indices = np.random.choice(num_trajectories, size=args.num_rollouts, replace=True)
+        trajectory_indices = sorted(trajectory_indices.tolist())  # Sort for deterministic order
+        print(f"Using seed {args.seed}: Selected trajectory indices {trajectory_indices}")
+    else:
+        # Random selection each time - use DataLoader with shuffle
+        trajectory_indices = None
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+        dataloader_iter = iter(dataloader)
+    
     print(f"Generating {args.num_rollouts} rollouts...")
     for i in tqdm(range(args.num_rollouts), desc="Rollouts"):
-        data = next(iter(dataloader))
+        if trajectory_indices is not None:
+            # Get specific trajectory by index (deterministic)
+            data = dataset[trajectory_indices[i]]
+            # Wrap in dict format to match what DataLoader returns
+            if isinstance(data, dict):
+                # Already in dict format, just ensure batch dimension
+                data = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in data.items()}
+            else:
+                # If dataset returns something else, wrap it
+                data = {'data': data.unsqueeze(0) if isinstance(data, torch.Tensor) else data}
+        else:
+            # Random selection - get next from iterator
+            try:
+                data = next(dataloader_iter)
+            except StopIteration:
+                # Reset iterator if we run out
+                dataloader_iter = iter(dataloader)
+                data = next(dataloader_iter)
         
         with torch.no_grad():
             gt_im1, gt_im2, pred_im1, pred_im2 = generate_rollout(
