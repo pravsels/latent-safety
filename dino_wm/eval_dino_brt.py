@@ -51,7 +51,7 @@ import imageio.v3 as iio
 
 transform = transforms.Compose([           
                                 transforms.Resize(256),                    
-                                transforms.CenterCrop(224),               
+                                transforms.CenterCrop(MODEL_CONFIG['image_size'][0]),               
                                 transforms.ToTensor(),                    
                                 transforms.Normalize(                      
                                 mean=[0.485, 0.456, 0.406],                
@@ -76,11 +76,12 @@ from torch import nn
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from dino_models import Decoder, VideoTransformer, normalize_acs, normalize_states
+from dino_wm.config import MODEL_CONFIG
 
 
 DINO_transform = transforms.Compose([           
-                                transforms.Resize(224),
-                                #transforms.CenterCrop(224), #should be multiple of model patch_size                 
+                                transforms.Resize(MODEL_CONFIG['image_size'][0]),
+                                #transforms.CenterCrop(MODEL_CONFIG['image_size'][0]), #should be multiple of model patch_size                 
                                 
                                 transforms.ToTensor(),])
 
@@ -234,17 +235,10 @@ state_min = torch.tensor(stats['state_min']).float().to(device)
 state_max = torch.tensor(stats['state_max']).float().to(device)
 
 wm = VideoTransformer(
-        image_size=(224, 224),
-        dim=384,  # DINO feature dimension
-        action_embed_dim=10,  # Action embedding dimension
-        state_embed_dim=10,  # State embedding dimension
         state_dim=state_dim,  # Inferred from dataset stats
         action_dim=action_dim,  # Inferred from dataset stats
-        depth=6,
-        heads=16,
-        mlp_dim=2048,
         num_frames=3,
-        dropout=0.1
+        **MODEL_CONFIG
     ).to(device)
 
 #wm.load_state_dict(torch.load('checkpoints/claude_zero_wfail4900.pth'))

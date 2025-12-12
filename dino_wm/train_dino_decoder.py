@@ -25,6 +25,7 @@ import torch.nn.functional as F
 
 from test_loader import SplitTrajectoryDataset
 from dino_decoder import VQVAE
+from dino_wm.config import MODEL_CONFIG
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -199,19 +200,20 @@ def main():
         output2_btchw = output2.permute(0, 1, 4, 2, 3).contiguous().view(
             B * T, C, H_img, W_img
         )
-        # Resize spatial dims to 224x224 so loss compares at decoder resolution
+        # Resize spatial dims to MODEL_CONFIG['image_size'] so loss compares at decoder resolution
+        img_size = MODEL_CONFIG['image_size']
         output1_btchw = F.interpolate(
-            output1_btchw, size=(224, 224), mode="bilinear", align_corners=False
+            output1_btchw, size=img_size, mode="bilinear", align_corners=False
         )
         output2_btchw = F.interpolate(
-            output2_btchw, size=(224, 224), mode="bilinear", align_corners=False
+            output2_btchw, size=img_size, mode="bilinear", align_corners=False
         )
         # Back to (B, T, H, W, C) after resize
         output1 = (
-            output1_btchw.view(B, T, C, 224, 224).permute(0, 1, 3, 4, 2).contiguous()
+            output1_btchw.view(B, T, C, img_size[0], img_size[1]).permute(0, 1, 3, 4, 2).contiguous()
         )
         output2 = (
-            output2_btchw.view(B, T, C, 224, 224).permute(0, 1, 3, 4, 2).contiguous()
+            output2_btchw.view(B, T, C, img_size[0], img_size[1]).permute(0, 1, 3, 4, 2).contiguous()
         )
 
 
@@ -256,25 +258,26 @@ def main():
                 output2_btchw_e = output2.permute(0, 1, 4, 2, 3).contiguous().view(
                     B_eval * T_eval, C_e, H_img_e, W_img_e
                 )
+                img_size = MODEL_CONFIG['image_size']
                 output1_btchw_e = F.interpolate(
                     output1_btchw_e,
-                    size=(224, 224),
+                    size=img_size,
                     mode="bilinear",
                     align_corners=False,
                 )
                 output2_btchw_e = F.interpolate(
                     output2_btchw_e,
-                    size=(224, 224),
+                    size=img_size,
                     mode="bilinear",
                     align_corners=False,
                 )
                 output1 = (
-                    output1_btchw_e.view(B_eval, T_eval, C_e, 224, 224)
+                    output1_btchw_e.view(B_eval, T_eval, C_e, img_size[0], img_size[1])
                     .permute(0, 1, 3, 4, 2)
                     .contiguous()
                 )
                 output2 = (
-                    output2_btchw_e.view(B_eval, T_eval, C_e, 224, 224)
+                    output2_btchw_e.view(B_eval, T_eval, C_e, img_size[0], img_size[1])
                     .permute(0, 1, 3, 4, 2)
                     .contiguous()
                 )

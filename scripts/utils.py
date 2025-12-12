@@ -4,6 +4,7 @@ import torch
 import numpy as np
 from torchvision import transforms
 from PIL import Image
+from dino_wm.config import MODEL_CONFIG
 
 # --- Monkeypatch for LeRobot Dataset ---
 # Fixes "ValueError: too many dimensions 'str'" when loading datasets with string columns
@@ -42,7 +43,7 @@ def preprocess_images_for_dino(images: torch.Tensor, is_front_camera: bool) -> t
     """
     Prepares a batch of images for DINO inference.
     Input: [B, 3, H, W] float32 tensor (0-1)
-    Output: [B, 3, 224, 224] normalized tensor
+    Output: [B, 3, H', W'] normalized tensor where (H', W') = MODEL_CONFIG['image_size']
     """
     # Standard ImageNet normalization
     mean = [0.485, 0.456, 0.406]
@@ -58,8 +59,8 @@ def preprocess_images_for_dino(images: torch.Tensor, is_front_camera: bool) -> t
         # Crop Top Middle: top=30, left=46, h=180, w=180
         out = transforms.functional.crop(out, top=30, left=46, height=180, width=180)
     
-    # Resize to 224x224 for ViT
-    out = transforms.functional.resize(out, (224, 224), antialias=True)
+    # Resize to MODEL_CONFIG['image_size'] for ViT
+    out = transforms.functional.resize(out, MODEL_CONFIG['image_size'], antialias=True)
     
     # Normalize
     out = transforms.functional.normalize(out, mean=mean, std=std)

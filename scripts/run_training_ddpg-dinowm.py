@@ -12,6 +12,7 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
 from dino_wm.dino_models import VideoTransformer
+from dino_wm.config import MODEL_CONFIG
 from dino_wm.test_loader import SplitTrajectoryDataset
 import ruamel.yaml as yaml
 
@@ -32,15 +33,10 @@ from torch.utils.data import DataLoader
 
 
 wm = VideoTransformer(
-        image_size=(224, 224),
-        dim=384,  # DINO feature dimension
-        ac_dim=10,  # Action embedding dimension
         state_dim=8,  # State dimension
-        depth=6,
-        heads=16,
-        mlp_dim=2048,
+        action_dim=6,  # Physical action dimension (inferred from environment)
         num_frames=3,
-        dropout=0.1
+        **MODEL_CONFIG
     )
 
 wm.load_state_dict(torch.load('/home/kensuke/latent-test/PytorchReachability/dino_wm/checkpoints/best_classifier_gp.pth'))

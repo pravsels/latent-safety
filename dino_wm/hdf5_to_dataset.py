@@ -18,6 +18,7 @@ from scipy.spatial.transform import Rotation as R
 from torchvision import transforms
 import torchvision.transforms.functional as F
 from tqdm import tqdm
+from dino_wm.config import MODEL_CONFIG
 
 # Image transforms
 
@@ -34,13 +35,13 @@ def crop_top_middle(image):
 crop_transform = transforms.Compose([
     transforms.ToPILImage(),
     transforms.Lambda(lambda img: crop_top_middle(img)),
-    transforms.Resize((224, 224)),
+    transforms.Resize(MODEL_CONFIG['image_size']),
     transforms.ToTensor()
 ])
 DINO_crop = transforms.Compose([
     transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 0.1)),
     transforms.Lambda(lambda img: crop_top_middle(img)),
-    transforms.Resize((224, 224)),
+    transforms.Resize(MODEL_CONFIG['image_size']),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225])
@@ -49,11 +50,11 @@ DINO_crop = transforms.Compose([
 #wrist cam transforms
 resize_transform = transforms.Compose([
     transforms.ToPILImage(),
-    transforms.Resize((224, 224)),
+    transforms.Resize(MODEL_CONFIG['image_size']),
     transforms.ToTensor()
 ])
 DINO_transform = transforms.Compose([
-    transforms.Resize(224),
+    transforms.Resize(MODEL_CONFIG['image_size'][0]),  # Resize takes single int or tuple
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225])
@@ -62,7 +63,7 @@ DINO_transform = transforms.Compose([
 
 
 def resize_images_to_224(images, key):
-    """Resize a batch of images to 224x224."""
+    """Resize a batch of images to MODEL_CONFIG['image_size']."""
     resized = []
     for i in range(len(images)):
         img = images[i]

@@ -10,6 +10,7 @@ from einops.layers.torch import Rearrange
 from typing import Tuple, Optional
 from torchvision import transforms
 from scipy.spatial.transform import Rotation
+from dino_wm.config import MODEL_CONFIG
 
 
 def batch_quat_to_rotvec(quaternions):
@@ -104,8 +105,14 @@ class ResidualBlock2(nn.Module):
         return x + self.block(x)
 
 class Decoder(nn.Module):
-    def __init__(self, in_channels=384, out_channels=3):
+    def __init__(self, in_channels=None, out_channels=3):
         super(Decoder, self).__init__()
+        
+        # Use MODEL_CONFIG['dim'] as default if not specified
+        if in_channels is None:
+            in_channels = MODEL_CONFIG['dim']
+        
+        self.in_channels = in_channels
         
         # Two residual blocks
         self.residual_blocks = nn.Sequential(
@@ -138,13 +145,13 @@ class Decoder(nn.Module):
             nn.ConvTranspose2d(in_channels // 8, out_channels, kernel_size=3, stride=1, padding=1)
         )
 
-        self.resize_transform = transforms.Resize((224, 224))
+        self.resize_transform = transforms.Resize(MODEL_CONFIG['image_size'])
 
         
     
     def forward(self, x):
 
-        x = x.view(-1, 16, 16, 384)  # Reshape to (16, 16, 384) where 16x16 is the spatial grid
+        x = x.view(-1, 16, 16, self.in_channels)  # Reshape to (16, 16, dim) where 16x16 is the spatial grid
         x = x.permute(0, 3, 1, 2)        # Pass through residual blocks
         x = self.residual_blocks(x)
         # Pass through transposed convolutions
@@ -285,7 +292,7 @@ class VideoTransformer(nn.Module):
             nn.Linear(action_dim, 128), # Uses physical action dimension
             nn.LayerNorm(128),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(128, action_embed_dim),
             nn.LayerNorm(action_embed_dim)
         ).to(device)
@@ -295,7 +302,7 @@ class VideoTransformer(nn.Module):
             nn.Linear(state_dim, 128), # Uses physical state dimension
             nn.LayerNorm(128),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(128, state_embed_dim),
             nn.LayerNorm(state_embed_dim)
         ).to(device)
@@ -462,7 +469,10 @@ def create_normal_dist(
     
 
 class TransposedConvDecoder(nn.Module):
-    def __init__(self, observation_shape=(3, 224, 224), emb_dim=512, activation=nn.ReLU, depth=64, kernel_size=5, stride=3):
+    def __init__(self, observation_shape=None, emb_dim=512, activation=nn.ReLU, depth=64, kernel_size=5, stride=3):
+        # Use MODEL_CONFIG['image_size'] as default if not specified
+        if observation_shape is None:
+            observation_shape = (3, MODEL_CONFIG['image_size'][0], MODEL_CONFIG['image_size'][1])
         super().__init__()
 
         activation = activation()

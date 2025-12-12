@@ -34,13 +34,14 @@ from tqdm import tqdm
 from test_loader import SplitTrajectoryDataset
 from dino_decoder import VQVAE
 from dino_models import VideoTransformer, normalize_acs, normalize_states, unnormalize_states
+from dino_wm.config import MODEL_CONFIG
 
 dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg')
 
 
 transform = transforms.Compose([           
                                 transforms.Resize(256),                    
-                                transforms.CenterCrop(224),               
+                                transforms.CenterCrop(MODEL_CONFIG['image_size'][0]),               
                                 transforms.ToTensor(),                    
                                 transforms.Normalize(                      
                                 mean=[0.485, 0.456, 0.406],                
@@ -49,7 +50,7 @@ transform = transforms.Compose([
 
 
 DINO_transform = transforms.Compose([           
-                            transforms.Resize(224),
+                            transforms.Resize(MODEL_CONFIG['image_size'][0]),
                             
                             transforms.ToTensor(),])
 norm_transform = transforms.Normalize(                      
@@ -267,17 +268,10 @@ def main():
 
     # Initialize world model
     transition = VideoTransformer(
-        image_size=(224, 224),
-        dim=384,                # DINO feature dimension
-        action_embed_dim=10,    # Action embedding dimension
-        state_embed_dim=10,     # State embedding dimension
         state_dim=state_dim,    # Inferred from dataset stats
         action_dim=action_dim,  # Inferred from dataset stats
-        depth=6,                # no of transformer blocks 
-        heads=16,               # no of attention heads per block
-        mlp_dim=2048,           # hidden dimension of feedforward network after attention
         num_frames=BL-1,        # context window size (input sequence length)
-        dropout=0.1             
+        **MODEL_CONFIG
     ).to(device)
     
     if args.resume_checkpoint is not None:
@@ -399,11 +393,11 @@ def main():
 
                 gt_states_eval = eval_data['state'][[0],:H].to(device)
                 input_states_eval = normalize_states(gt_states_eval, state_min, state_max)
-                # Resize images to 224x224 to match decoder output
+                # Resize images to MODEL_CONFIG['image_size'] to match decoder output
                 im1s = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.  # (T, H, W, C)
                 im2s = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
-                im1s = F.interpolate(im1s.permute(0, 3, 1, 2), size=(224, 224), mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-                im2s = F.interpolate(im2s.permute(0, 3, 1, 2), size=(224, 224), mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+                im1s = F.interpolate(im1s.permute(0, 3, 1, 2), size=MODEL_CONFIG['image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+                im2s = F.interpolate(im2s.permute(0, 3, 1, 2), size=MODEL_CONFIG['image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
                 for k in range(EVAL_H-H):
                     pred_front, pred_wrist, pred_state, _ = transition(input_front_embd_eval, input_wrist_embd_eval, input_states_eval, acs)
 
@@ -424,9 +418,9 @@ def main():
 
                 gt_im1 = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device)  # (T, H, W, C)
                 gt_im2 = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device)
-                # Resize to 224x224 to match decoder output
-                gt_im1 = F.interpolate(gt_im1.permute(0, 3, 1, 2).float(), size=(224, 224), mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-                gt_im2 = F.interpolate(gt_im2.permute(0, 3, 1, 2).float(), size=(224, 224), mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+                # Resize to MODEL_CONFIG['image_size'] to match decoder output
+                gt_im1 = F.interpolate(gt_im1.permute(0, 3, 1, 2).float(), size=MODEL_CONFIG['image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+                gt_im2 = F.interpolate(gt_im2.permute(0, 3, 1, 2).float(), size=MODEL_CONFIG['image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
 
                 gt_imgs = torch.cat([gt_im1, gt_im2], dim=-2)/255.
                 pred_imgs = torch.cat([im1s, im2s], dim=-2)

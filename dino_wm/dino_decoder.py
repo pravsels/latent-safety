@@ -7,6 +7,7 @@ sys.path.append('..')
 #import distributed_fn as dist_fn
 from einops import rearrange
 from torchvision import transforms
+from dino_wm.config import MODEL_CONFIG
 
 # Copyright 2018 The Sonnet Authors. All Rights Reserved.
 #
@@ -168,14 +169,20 @@ class VQVAE(nn.Module):
     def __init__(
         self,
         in_channel=3,
-        channel=384,
+        channel=None,
         n_res_block=4,
         n_res_channel=128,
-        emb_dim=384,
+        emb_dim=None,
         n_embed=2048,
         decay=0.99,
         quantize=False,
     ):
+        # Use MODEL_CONFIG['dim'] as default for emb_dim (DINO feature dimension)
+        if emb_dim is None:
+            emb_dim = MODEL_CONFIG['dim']
+        # channel defaults to emb_dim (they're typically the same)
+        if channel is None:
+            channel = emb_dim
         super().__init__()
 
         self.quantize = quantize
@@ -213,8 +220,8 @@ class VQVAE(nn.Module):
         diff_b = diff_b.unsqueeze(0)
         dec = self.decode(quant_b)
 
-        # dec = F.interpolate(dec, size=(224, 224), mode="bilinear", align_corners=False)
-        dec = transforms.Resize(224)(dec)
+        # Resize to match MODEL_CONFIG image_size
+        dec = transforms.Resize(MODEL_CONFIG['image_size'])(dec)
         
         return dec, diff_b  # diff is 0 if no quantization
 

@@ -27,6 +27,7 @@ import numpy as np
 
 from dino_decoder import VQVAE
 from test_loader import SplitTrajectoryDataset
+from dino_wm.config import MODEL_CONFIG
 
 
 # Default configuration
@@ -153,14 +154,15 @@ def main():
             gt1 = data["agentview_image"].unsqueeze(0).to(device) / 255.0
             gt2 = data["robot0_eye_in_hand_image"].unsqueeze(0).to(device) / 255.0
             
-            # Resize GT to 224x224
+            # Resize GT to MODEL_CONFIG['image_size']
+            img_size = MODEL_CONFIG['image_size']
             B, T, H, W, C = gt1.shape
             gt1 = gt1.permute(0, 1, 4, 2, 3).reshape(B*T, C, H, W)
             gt2 = gt2.permute(0, 1, 4, 2, 3).reshape(B*T, C, H, W)
-            gt1 = F.interpolate(gt1, size=(224, 224), mode="bilinear", align_corners=False)
-            gt2 = F.interpolate(gt2, size=(224, 224), mode="bilinear", align_corners=False)
-            gt1 = gt1.view(B, T, C, 224, 224).permute(0, 1, 3, 4, 2).squeeze(1)
-            gt2 = gt2.view(B, T, C, 224, 224).permute(0, 1, 3, 4, 2).squeeze(1)
+            gt1 = F.interpolate(gt1, size=img_size, mode="bilinear", align_corners=False)
+            gt2 = F.interpolate(gt2, size=img_size, mode="bilinear", align_corners=False)
+            gt1 = gt1.view(B, T, C, img_size[0], img_size[1]).permute(0, 1, 3, 4, 2).squeeze(1)
+            gt2 = gt2.view(B, T, C, img_size[0], img_size[1]).permute(0, 1, 3, 4, 2).squeeze(1)
             
             # Run decoder
             inputs = torch.cat([inputs1, inputs2], dim=0)
