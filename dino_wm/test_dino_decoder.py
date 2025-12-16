@@ -88,6 +88,8 @@ def parse_args():
                         help="Random seed for reproducibility (default: None)")
     parser.add_argument("--info", action="store_true",
                         help="Only show dataset info, don't run evaluation")
+    parser.add_argument("--quantize", action="store_true",
+                        help="Enable VQ codebook quantization (must match training setting)")
     return parser.parse_args()
 
 
@@ -108,7 +110,11 @@ def main():
     
     # Load model
     print(f"Loading checkpoint: {args.checkpoint}")
-    decoder = VQVAE().to(device)
+    decoder = VQVAE(quantize=args.quantize).to(device)
+    if args.quantize:
+        print("VQ codebook quantization enabled")
+    else:
+        print("VQ codebook quantization disabled (standard autoencoder)")
     decoder.load_state_dict(torch.load(args.checkpoint, map_location=device))
     decoder.eval()
     
@@ -154,8 +160,8 @@ def main():
             gt1 = data["agentview_image"].unsqueeze(0).to(device) / 255.0
             gt2 = data["robot0_eye_in_hand_image"].unsqueeze(0).to(device) / 255.0
             
-            # Resize GT to MODEL_CONFIG['image_size']
-            img_size = MODEL_CONFIG['image_size']
+            # Resize GT to MODEL_CONFIG['decoder_image_size'] (decoder's native resolution)
+            img_size = MODEL_CONFIG['decoder_image_size']
             B, T, H, W, C = gt1.shape
             gt1 = gt1.permute(0, 1, 4, 2, 3).reshape(B*T, C, H, W)
             gt2 = gt2.permute(0, 1, 4, 2, 3).reshape(B*T, C, H, W)

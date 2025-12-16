@@ -113,6 +113,11 @@ def main():
         default=0,
         help="Iteration to start training from (default: 0).",
     )
+    parser.add_argument(
+        "--quantize",
+        action="store_true",
+        help="Enable VQ codebook quantization (default: False).",
+    )
     args = parser.parse_args()
 
     wandb.init(
@@ -161,7 +166,11 @@ def main():
     expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
     device = args.device
     
-    decoder = VQVAE().to(device)
+    decoder = VQVAE(quantize=args.quantize).to(device)
+    if args.quantize:
+        print("VQ codebook quantization enabled")
+    else:
+        print("VQ codebook quantization disabled (standard autoencoder)")
     
     if args.resume_checkpoint is not None:
         print(f"Resuming from checkpoint: {args.resume_checkpoint}")
@@ -188,7 +197,7 @@ def main():
 
         inputs1 = data["cam_zed_embd"].to(device)
         inputs2 = data["cam_rs_embd"].to(device)
-        # Ground truth images start as (B, T, H_img, W_img, C); we resize to 224x224 to match decoder output.
+        # Ground truth images start as (B, T, H_img, W_img, C); we resize to decoder_image_size (256x256) to match decoder's native output.
         output1 = data["agentview_image"].to(device) / 255.0  # (B, T, H, W, C)
         output2 = data["robot0_eye_in_hand_image"].to(device) / 255.0
 
@@ -200,8 +209,8 @@ def main():
         output2_btchw = output2.permute(0, 1, 4, 2, 3).contiguous().view(
             B * T, C, H_img, W_img
         )
-        # Resize spatial dims to MODEL_CONFIG['image_size'] so loss compares at decoder resolution
-        img_size = MODEL_CONFIG['image_size']
+        # Resize spatial dims to MODEL_CONFIG['decoder_image_size'] so loss compares at decoder resolution
+        img_size = MODEL_CONFIG['decoder_image_size']
         output1_btchw = F.interpolate(
             output1_btchw, size=img_size, mode="bilinear", align_corners=False
         )
@@ -219,7 +228,7 @@ def main():
 
         inputs = torch.cat([inputs1, inputs2], dim=0)
 
-        pred, _ = decoder(inputs)
+        pred, diff = decoder(inputs)
         # Decoder returns (B*T, C, H_dec, W_dec); restore (B, T, C, H, W) with T=1
         pred = rearrange(pred, "(b t) c h w -> b t c h w", t=1)
         
@@ -231,8 +240,11 @@ def main():
         output1_bhwc = output1.squeeze(1)
         output2_bhwc = output2.squeeze(1)
 
-        loss = nn.MSELoss()(pred1, output1_bhwc)
-        loss += nn.MSELoss()(pred2, output2_bhwc)
+        recon_loss = nn.MSELoss()(pred1, output1_bhwc)
+        recon_loss += nn.MSELoss()(pred2, output2_bhwc)
+        # VQ commitment / codebook loss (scalar)
+        vq_loss = diff.mean()
+        loss = recon_loss + 0.25 * vq_loss
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -258,7 +270,7 @@ def main():
                 output2_btchw_e = output2.permute(0, 1, 4, 2, 3).contiguous().view(
                     B_eval * T_eval, C_e, H_img_e, W_img_e
                 )
-                img_size = MODEL_CONFIG['image_size']
+                img_size = MODEL_CONFIG['decoder_image_size']
                 output1_btchw_e = F.interpolate(
                     output1_btchw_e,
                     size=img_size,
@@ -284,7 +296,7 @@ def main():
 
 
                 inputs = torch.cat([inputs1, inputs2], dim=0)
-                pred, _ = decoder(inputs)
+                pred, diff = decoder(inputs)
                 pred = rearrange(pred, "(b t) c h w -> b t c h w", t=1)
                 pred1, pred2 = torch.split(
                     pred, [inputs1.shape[0], inputs2.shape[0]], dim=0
@@ -295,8 +307,10 @@ def main():
                 output1_bhwc = output1.squeeze(1)
                 output2_bhwc = output2.squeeze(1)
                 
-                loss = nn.MSELoss()(pred1, output1_bhwc)
-                loss += nn.MSELoss()(pred2, output2_bhwc)
+                recon_loss = nn.MSELoss()(pred1, output1_bhwc)
+                recon_loss += nn.MSELoss()(pred2, output2_bhwc)
+                vq_loss = diff.mean()
+                loss = recon_loss + 0.25 * vq_loss
 
             print()
             print(f"\rIter {i}, Eval Loss: {loss.item():.4f}")

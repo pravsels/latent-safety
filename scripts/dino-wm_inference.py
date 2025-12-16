@@ -217,6 +217,8 @@ def main():
                        help="Video FPS (default: 20)")
     parser.add_argument("--seed", type=int, default=None,
                        help="Random seed for trajectory selection. Use the same seed for different checkpoints to ensure same trajectories are used for comparison (default: None, random)")
+    parser.add_argument("--quantize", action="store_true",
+                        help="Enable VQ codebook quantization (must match training setting)")
     
     args = parser.parse_args()
     
@@ -250,7 +252,11 @@ def main():
     
     # Load models
     print("Loading models...")
-    decoder = VQVAE().to(device)
+    decoder = VQVAE(quantize=args.quantize).to(device)
+    if args.quantize:
+        print("VQ codebook quantization enabled")
+    else:
+        print("VQ codebook quantization disabled (standard autoencoder)")
     decoder.load_state_dict(torch.load(args.decoder_checkpoint, map_location=device, weights_only=False))
     decoder.eval()
     

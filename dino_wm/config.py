@@ -4,7 +4,8 @@ Global configuration for DINO World Model.
 
 # Model Architecture
 MODEL_CONFIG = {
-    'image_size': (224, 224),
+    'image_size': (224, 224),         # Input image size for DINO / world model
+    'decoder_image_size': (256, 256), # Native output size for image decoder / VQVAE
     'dim': 384,                # DINOv2 feature dimension
     'action_embed_dim': 10,    # Action embedding dimension
     'state_embed_dim': 10,     # State embedding dimension

@@ -4,7 +4,6 @@ from torch.nn import functional as F
 
 import sys
 sys.path.append('..')
-#import distributed_fn as dist_fn
 from einops import rearrange
 from torchvision import transforms
 from dino_wm.config import MODEL_CONFIG
@@ -58,8 +57,14 @@ class Quantize(nn.Module):
             embed_onehot_sum = embed_onehot.sum(0)
             embed_sum = flatten.transpose(0, 1) @ embed_onehot
 
-            dist_fn.all_reduce(embed_onehot_sum)
-            dist_fn.all_reduce(embed_sum)
+            # Distributed training support (if available)
+            try:
+                import distributed_fn as dist_fn
+                dist_fn.all_reduce(embed_onehot_sum)
+                dist_fn.all_reduce(embed_sum)
+            except (ImportError, NameError):
+                # Single-device training: no-op
+                pass
 
             self.cluster_size.data.mul_(self.decay).add_(
                 embed_onehot_sum, alpha=1 - self.decay
@@ -219,10 +224,7 @@ class VQVAE(nn.Module):
         quant_b = quant_b.permute(0, 3, 1, 2)   # (b, t, num_patches, emb_dim) -> (b, emb_dim, t, num_patches)
         diff_b = diff_b.unsqueeze(0)
         dec = self.decode(quant_b)
-
-        # Resize to match MODEL_CONFIG image_size
-        dec = transforms.Resize(MODEL_CONFIG['image_size'])(dec)
-        
+        # Decoder already produces its native resolution; no extra resize here.
         return dec, diff_b  # diff is 0 if no quantization
 
     def decode(self, quant_b):
