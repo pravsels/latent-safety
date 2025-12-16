@@ -4,11 +4,20 @@ Train the DINO decoder (VQVAE) to reconstruct both cameras from DINO patch embed
 
 Quickstart:
 
+  # Standard autoencoder (no quantization)
   python dino_wm/train_dino_decoder.py \
-  --hdf5-file ${data_dir}/arx5_subset_train.h5 \
-  --resume-checkpoint dino_decoder_checkpoints/testing_decoder.pth \
-  --start-iter 2300 \
-  --batch-size 256
+    --hdf5-file ${data_dir}/arx5_subset_train.h5 \
+    --resume-checkpoint dino_decoder_checkpoints/testing_decoder.pth \
+    --start-iter 2300 \
+    --batch-size 256
+
+  # With VQ codebook quantization enabled
+  python dino_wm/train_dino_decoder.py \
+    --hdf5-file ${data_dir}/arx5_subset_train.h5 \
+    --resume-checkpoint dino_decoder_checkpoints/testing_decoder.pth \
+    --start-iter 2300 \
+    --batch-size 256 \
+    --quantize
 """
 
 import argparse
