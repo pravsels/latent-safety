@@ -103,6 +103,21 @@ class TrajectoryLabeler:
     def load_trajectory(self, idx: int):
         if idx < 0 or idx >= self.num_trajectories:
             return
+        
+        # Before loading new trajectory, finalize any active marking
+        if self.mark_start_frame is not None and self.labels is not None:
+            self.push_history()
+            start = self.mark_start_frame
+            end = self.total_frames - 1  # Mark to end of current trajectory
+            
+            # Apply the marking based on label type
+            if self.mark_label_type == 1:
+                self.labels[start:end+1] = 1  # Unsafe
+            elif self.mark_label_type == 2:
+                self.labels[start:end+1] = 2  # Weak unsafe
+            
+            # Save the labels before switching trajectories
+            self.save_labels()
             
         self.session.current_traj_idx = idx
         traj_name = self.traj_keys[idx]
@@ -275,13 +290,27 @@ class TrajectoryLabeler:
         unsafe_indices = np.where(self.labels == 1)[0]
         weak_unsafe_indices = np.where(self.labels == 2)[0]
         
-        for idx in unsafe_indices:
-            x = int(idx * scale)
-            cv2.line(vis, (x, h-bar_h), (x, h), COLOR_UNSAFE, 1)
+        # Helper function to draw contiguous regions as filled rectangles
+        def draw_contiguous_regions(indices, color):
+            if len(indices) == 0:
+                return
+            # Group consecutive indices
+            ranges = []
+            start = indices[0]
+            for i in range(1, len(indices)):
+                if indices[i] != indices[i-1] + 1:
+                    ranges.append((start, indices[i-1]))
+                    start = indices[i]
+            ranges.append((start, indices[-1]))
+            
+            # Draw filled rectangles for each range
+            for start_idx, end_idx in ranges:
+                x1 = int(start_idx * scale)
+                x2 = int((end_idx + 1) * scale)  # +1 to include the last frame
+                cv2.rectangle(vis, (x1, h-bar_h), (x2, h), color, -1)
         
-        for idx in weak_unsafe_indices:
-            x = int(idx * scale)
-            cv2.line(vis, (x, h-bar_h), (x, h), COLOR_WEAK_UNSAFE, 1)
+        draw_contiguous_regions(unsafe_indices, COLOR_UNSAFE)
+        draw_contiguous_regions(weak_unsafe_indices, COLOR_WEAK_UNSAFE)
             
         # Draw current position cursor
         cursor_x = int(self.current_frame * scale)
