@@ -178,13 +178,16 @@ class VQVAE(nn.Module):
         n_res_block=4,
         n_res_channel=128,
         emb_dim=None,
-        n_embed=2048,
+        n_embed=None,
         decay=0.99,
         quantize=False,
     ):
         # Use MODEL_CONFIG['dim'] as default for emb_dim (DINO feature dimension)
         if emb_dim is None:
             emb_dim = MODEL_CONFIG['dim']
+        # Use MODEL_CONFIG['codebook_size'] as default for n_embed (VQ codebook size)
+        if n_embed is None:
+            n_embed = MODEL_CONFIG['codebook_size']
         # channel defaults to emb_dim (they're typically the same)
         if channel is None:
             channel = emb_dim
