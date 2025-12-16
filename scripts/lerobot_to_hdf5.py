@@ -8,18 +8,6 @@ QUICKSTART:
         --datasets-list arx5_datasets.json \
         --output-hdf5 arx5_datasets.h5 \
         --batch-size 256 --resume
-
-CRASH-RESISTANT VERSION with:
-- Resume capability (can continue from interruptions)
-- Flush after EVERY trajectory (protects against abrupt kills/OOM/crashes)
-- Signal handling for graceful shutdown (Ctrl+C)
-- Better progress tracking and validation
-- Uses HDF5 libver='latest' for crash resistance
-
-This script is designed to handle:
-- Graceful interrupts (Ctrl+C, SIGTERM)
-- Abrupt kills (kill -9, OOM killer, system crashes)
-- Power failures (data is safe after each flush)
 """
 
 import argparse
@@ -198,7 +186,6 @@ def process_dataset(
             pbar.update(1)
             continue
             
-        # Success - Process on GPU in CHUNKS
         # Success - Process on GPU in CHUNKS
         try:
             start_idx = payload["start_idx"]
