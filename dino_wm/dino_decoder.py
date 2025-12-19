@@ -6,7 +6,7 @@ import sys
 sys.path.append('..')
 from einops import rearrange
 from torchvision import transforms
-from dino_wm.config import MODEL_CONFIG
+from dino_wm.config import MODEL_CONFIG, DECODER_CONFIG
 
 # Copyright 2018 The Sonnet Authors. All Rights Reserved.
 #
@@ -187,7 +187,7 @@ class VQVAE(nn.Module):
             emb_dim = MODEL_CONFIG['dim']
         # Use MODEL_CONFIG['codebook_size'] as default for n_embed (VQ codebook size)
         if n_embed is None:
-            n_embed = MODEL_CONFIG['codebook_size']
+            n_embed = DECODER_CONFIG['codebook_size']
         # channel defaults to emb_dim (they're typically the same)
         if channel is None:
             channel = emb_dim

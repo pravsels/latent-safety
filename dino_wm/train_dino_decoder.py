@@ -34,7 +34,7 @@ import torch.nn.functional as F
 
 from test_loader import SplitTrajectoryDataset
 from dino_decoder import VQVAE
-from dino_wm.config import MODEL_CONFIG
+from dino_wm.config import MODEL_CONFIG, DECODER_CONFIG, TRAIN_CONFIG
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -232,7 +232,7 @@ def main():
             B * T, C, H_img, W_img
         )
         # Resize spatial dims to MODEL_CONFIG['decoder_image_size'] so loss compares at decoder resolution
-        img_size = MODEL_CONFIG['decoder_image_size']
+        img_size = DECODER_CONFIG['decoder_image_size']
         output1_btchw = F.interpolate(
             output1_btchw, size=img_size, mode="bilinear", align_corners=False
         )
@@ -292,7 +292,7 @@ def main():
                 output2_btchw_e = output2.permute(0, 1, 4, 2, 3).contiguous().view(
                     B_eval * T_eval, C_e, H_img_e, W_img_e
                 )
-                img_size = MODEL_CONFIG['decoder_image_size']
+                img_size = DECODER_CONFIG['decoder_image_size']
                 output1_btchw_e = F.interpolate(
                     output1_btchw_e,
                     size=img_size,

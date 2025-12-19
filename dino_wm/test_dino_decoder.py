@@ -27,7 +27,7 @@ import numpy as np
 
 from dino_decoder import VQVAE
 from test_loader import SplitTrajectoryDataset
-from dino_wm.config import MODEL_CONFIG
+from dino_wm.config import MODEL_CONFIG, DECODER_CONFIG
 
 
 # Default configuration
@@ -161,7 +161,7 @@ def main():
             gt2 = data["robot0_eye_in_hand_image"].unsqueeze(0).to(device) / 255.0
             
             # Resize GT to MODEL_CONFIG['decoder_image_size'] (decoder's native resolution)
-            img_size = MODEL_CONFIG['decoder_image_size']
+            img_size = DECODER_CONFIG['decoder_image_size']
             B, T, H, W, C = gt1.shape
             gt1 = gt1.permute(0, 1, 4, 2, 3).reshape(B*T, C, H, W)
             gt2 = gt2.permute(0, 1, 4, 2, 3).reshape(B*T, C, H, W)
