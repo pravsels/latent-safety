@@ -219,10 +219,9 @@ def main():
 
         inputs1 = data["cam_zed_embd"].to(device)
         inputs2 = data["cam_rs_embd"].to(device)
-        # Ground truth images start as (B, T, H_img, W_img, C); we resize to decoder_image_size (256x256) to match decoder's native output.
+        # Ground truth images start as (B, T, H_img, W_img, C); we resize to DECODER_CONFIG['decoder_image_size'] to match decoder's native output.
         output1 = data["agentview_image"].to(device) / 255.0  # (B, T, H, W, C)
         output2 = data["robot0_eye_in_hand_image"].to(device) / 255.0
-
         B, T, H_img, W_img, C = output1.shape
         # Flatten batch & time and go to BCHW for interpolate: (B, T, H, W, C) -> (B*T, C, H, W)
         output1_btchw = output1.permute(0, 1, 4, 2, 3).contiguous().view(
@@ -231,7 +230,7 @@ def main():
         output2_btchw = output2.permute(0, 1, 4, 2, 3).contiguous().view(
             B * T, C, H_img, W_img
         )
-        # Resize spatial dims to MODEL_CONFIG['decoder_image_size'] so loss compares at decoder resolution
+        # Resize spatial dims to DECODER_CONFIG['decoder_image_size'] so loss compares at decoder resolution
         img_size = DECODER_CONFIG['decoder_image_size']
         output1_btchw = F.interpolate(
             output1_btchw, size=img_size, mode="bilinear", align_corners=False
