@@ -429,8 +429,8 @@ def main():
                     inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
                     states = torch.cat([states[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
                 
-                gt_im1_raw = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device)
-                gt_im2_raw = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device)
+                gt_im1_raw = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device).float()
+                gt_im2_raw = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device).float()
                 
                 gt_im1 = torch.nn.functional.interpolate(
                     gt_im1_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
