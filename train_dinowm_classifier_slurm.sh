@@ -26,20 +26,19 @@ repo_dir="${home_dir}/${repo}"
 data_dir="${scratch_dir}/${repo}"
 container="${repo_dir}/container/${repo}_arm64.sif"
 
+# Training parameters (easily configurable)
+HDF5_FILE="${data_dir}/cubes_push_labeled_combined.h5"
+DATASET_STATS="${data_dir}/cubes_push_labeled_dataset_stats.json"
+DECODER_CHECKPOINT="${data_dir}/dino_decoder_checkpoints/testing_decoder.pth"
+WM_CHECKPOINT="${data_dir}/dino_wm_checkpoints/best_wm.pth"
+BATCH_SIZE=64
+SEQUENCE_LENGTH=16
+WANDB_PROJECT="latent-safety"
+WANDB_NAME="cubes_push_classifier"
+CHECKPOINT_DIR="${data_dir}/dino_wm_checkpoints"
+
 # Create logs directory if it doesn't exist
 mkdir -p "${data_dir}/logs"
-
-entrypoint="bash -c 'export PYTHONPATH=${repo_dir}:\$PYTHONPATH && \
-python dino_wm/train_dino_classifier.py \
-  --hdf5-file ${data_dir}/cubes_push_labeled_combined.h5 \
-  --dataset-stats ${data_dir}/cubes_push_labeled_dataset_stats.json \
-  --decoder-checkpoint ${data_dir}/dino_decoder_checkpoints/testing_decoder.pth \
-  --wm-checkpoint ${data_dir}/dino_wm_checkpoints/best_wm.pth \
-  --batch-size 64 \
-  --sequence-length 16 \
-  --wandb-project latent-safety \
-  --wandb-name cubes_push_classifier \
-  --checkpoint-dir ${data_dir}/dino_wm_checkpoints'"
 
 start_time="$(date -Is --utc)"
 
@@ -48,7 +47,7 @@ apptainer exec --nv \
           --pwd "${repo_dir}" \
           --bind "${scratch_dir}:${scratch_dir}" \
           "${container}" \
-          ${entrypoint}
+          bash -c "export PYTHONPATH=${repo_dir}:\$PYTHONPATH && python dino_wm/train_dino_classifier.py --hdf5-file ${HDF5_FILE} --dataset-stats ${DATASET_STATS} --decoder-checkpoint ${DECODER_CHECKPOINT} --wm-checkpoint ${WM_CHECKPOINT} --batch-size ${BATCH_SIZE} --sequence-length ${SEQUENCE_LENGTH} --wandb-project ${WANDB_PROJECT} --wandb-name ${WANDB_NAME} --checkpoint-dir ${CHECKPOINT_DIR}"
 
 end_time="$(date -Is --utc)"
 
