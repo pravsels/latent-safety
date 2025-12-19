@@ -23,7 +23,6 @@ import torch
 import random
 import wandb
 from torch.utils.data import DataLoader
-from torchvision import transforms
 from torch.optim import AdamW
 from torch import nn
 import torch.nn.functional as F
@@ -35,28 +34,6 @@ from test_loader import SplitTrajectoryDataset
 from dino_decoder import VQVAE
 from dino_models import VideoTransformer, normalize_acs, normalize_states, unnormalize_states
 from dino_wm.config import MODEL_CONFIG
-
-dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg')
-
-
-transform = transforms.Compose([           
-                                transforms.Resize(256),                    
-                                transforms.CenterCrop(MODEL_CONFIG['image_size'][0]),               
-                                transforms.ToTensor(),                    
-                                transforms.Normalize(                      
-                                mean=[0.485, 0.456, 0.406],                
-                                std=[0.229, 0.224, 0.225]              
-                                )])
-
-
-DINO_transform = transforms.Compose([           
-                            transforms.Resize(MODEL_CONFIG['image_size'][0]),
-                            
-                            transforms.ToTensor(),])
-norm_transform = transforms.Normalize(                      
-                                mean=[0.485, 0.456, 0.406],                
-                                std=[0.229, 0.224, 0.225]              
-                                )
 
 
 def main():
@@ -262,7 +239,7 @@ def main():
 
     # Load decoder
     decoder = VQVAE().to(device)
-    decoder.load_state_dict(torch.load(args.decoder_checkpoint))
+    decoder.load_state_dict(torch.load(args.decoder_checkpoint, map_location=device))
     decoder.eval()
     print(f"Loaded decoder from {args.decoder_checkpoint}")
 
@@ -276,7 +253,12 @@ def main():
     
     if args.resume_checkpoint is not None:
         print(f"Resuming from checkpoint: {args.resume_checkpoint}")
-        transition.load_state_dict(torch.load(args.resume_checkpoint, map_location=device))
+        ckpt = torch.load(args.resume_checkpoint, map_location=device)
+        # Handle both old (state_dict) and new (dict with model_state_dict) formats
+        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+            transition.load_state_dict(ckpt['model_state_dict'])
+        else:
+            transition.load_state_dict(ckpt)
     
     transition.train()
     
@@ -292,17 +274,25 @@ def main():
         {'params': [transition.temp_embedding], 'lr': 5e-4}
     ])
 
+    # Load best_eval from existing best checkpoint to persist across sessions
     best_eval = float('inf')
+    best_ckpt_path = os.path.join(args.checkpoint_dir, 'best_wm.pth')
+    if os.path.exists(best_ckpt_path):
+        best_ckpt = torch.load(best_ckpt_path, map_location=device)
+        if isinstance(best_ckpt, dict) and 'best_eval' in best_ckpt:
+            best_eval = best_ckpt['best_eval']
+            print(f"Loaded previous best eval: {best_eval:.4f}")
+    
     iters = []
     train_iter = args.train_iters
     start_iter = args.start_iter
 
     for i in tqdm(range(start_iter, train_iter), desc="Training", unit="iter"):
-        if i % len(expert_loader) == 0:
+        if i > 0 and i % len(expert_loader) == 0:
             expert_loader = iter(DataLoader(expert_data, batch_size=BS, shuffle=True))
-        if i % len(expert_loader_eval) == 0:
+        if i > 0 and i % len(expert_loader_eval) == 0:
             expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
-        if i % len(expert_loader_imagine) == 0:
+        if i > 0 and i % len(expert_loader_imagine) == 0:
             expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
 
         data = next(expert_loader)
@@ -471,13 +461,19 @@ def main():
 
             if loss < best_eval:
                 best_eval = loss
-                torch.save(transition.state_dict(), os.path.join(args.checkpoint_dir, 'best_wm.pth'))
+                torch.save({
+                    'model_state_dict': transition.state_dict(),
+                    'best_eval': best_eval.item() if hasattr(best_eval, 'item') else best_eval
+                }, os.path.join(args.checkpoint_dir, 'best_wm.pth'))
             
             transition.train()
             wandb.log({'eval_loss': loss.item(), 'front_loss': loss_front.item(), 'wrist_loss': loss_wrist.item(), 'state_loss': loss_state.item(), 'pred_front': wandb.Image(pred_im1), 'pred_wrist': wandb.Image(pred_im2), 'front': wandb.Image(im1), 'wrist': wandb.Image(im2)})
 
     plt.legend()
     plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
+
+    best_eval_val = best_eval.item() if hasattr(best_eval, 'item') else best_eval
+    print(f"\nTraining complete. Best eval loss: {best_eval_val:.4f}")
 
 
 if __name__ == "__main__":

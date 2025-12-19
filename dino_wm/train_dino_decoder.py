@@ -183,7 +183,12 @@ def main():
     
     if args.resume_checkpoint is not None:
         print(f"Resuming from checkpoint: {args.resume_checkpoint}")
-        decoder.load_state_dict(torch.load(args.resume_checkpoint, map_location=device))
+        ckpt = torch.load(args.resume_checkpoint, map_location=device)
+        # Handle both old (state_dict) and new (dict with model_state_dict) formats
+        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+            decoder.load_state_dict(ckpt['model_state_dict'])
+        else:
+            decoder.load_state_dict(ckpt)
 
     print('decoder with parameters', count_parameters(decoder))
     
@@ -191,16 +196,24 @@ def main():
         {'params': decoder.parameters(), 'lr': 3e-4}
     ])
 
+    # Load best_eval from existing best checkpoint to persist across sessions
     best_eval = float('inf')
+    best_ckpt_path = os.path.join(args.checkpoint_dir, 'best_decoder.pth')
+    if os.path.exists(best_ckpt_path):
+        best_ckpt = torch.load(best_ckpt_path, map_location=device)
+        if isinstance(best_ckpt, dict) and 'best_eval' in best_ckpt:
+            best_eval = best_ckpt['best_eval']
+            print(f"Loaded previous best eval: {best_eval:.4f}")
+    
     iters = []
     train_losses = []
     eval_losses = []
     train_iter = args.train_iters
     start_iter = args.start_iter
     for i in range(start_iter, train_iter):
-        if i % len(expert_loader) == 0:
+        if i > 0 and i % len(expert_loader) == 0:
             expert_loader = iter(DataLoader(expert_data, batch_size=BS, shuffle=True))
-        if i % len(expert_loader_eval) == 0:
+        if i > 0 and i % len(expert_loader_eval) == 0:
             expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
         data = next(expert_loader)
 
@@ -326,7 +339,13 @@ def main():
             if loss < best_eval:
                 best_eval = loss
                 os.makedirs(args.checkpoint_dir, exist_ok=True)
+                # Save regular checkpoint for backward compatibility
                 torch.save(decoder.state_dict(), os.path.join(args.checkpoint_dir, 'testing_decoder.pth'))
+                # Save best checkpoint with metadata to persist best_eval across sessions
+                torch.save({
+                    'model_state_dict': decoder.state_dict(),
+                    'best_eval': best_eval.item() if hasattr(best_eval, 'item') else best_eval
+                }, os.path.join(args.checkpoint_dir, 'best_decoder.pth'))
             decoder.train()
             
             out_log = (output1_bhwc[0].detach().cpu().numpy())
@@ -343,6 +362,9 @@ def main():
     plt.legend()
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
+
+    best_eval_val = best_eval.item() if hasattr(best_eval, 'item') else best_eval
+    print(f"\nTraining complete. Best eval loss: {best_eval_val:.4f}")
 
 
 if __name__ == "__main__":
