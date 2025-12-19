@@ -30,7 +30,7 @@ from tqdm import tqdm
 from dino_decoder import VQVAE
 from test_loader import SplitTrajectoryDataset
 from dino_models import VideoTransformer, normalize_acs, normalize_states
-from dino_wm.config import MODEL_CONFIG, TRAIN_CONFIG
+from dino_wm.config import MODEL_CONFIG, TRAIN_CONFIG, DECODER_CONFIG
 
 
 def fail_loss(pred, fail_data):
@@ -387,8 +387,23 @@ def main():
                 acs = normalize_acs(acs, action_min, action_max)
                 eval_states = eval_data['state'][[0],:H].to(device)
                 states = normalize_states(eval_states, state_min, state_max)
-                im1s = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.
-                im2s = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
+                
+                # Get decoder output size from config
+                decoder_h, decoder_w = DECODER_CONFIG['decoder_image_size']
+                
+                # Load and resize ground truth to match decoder output
+                im1s_raw = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.
+                im2s_raw = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
+                
+                im1s = torch.nn.functional.interpolate(
+                    im1s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                    mode='bilinear', align_corners=False
+                ).permute(0,2,3,1)
+                im2s = torch.nn.functional.interpolate(
+                    im2s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                    mode='bilinear', align_corners=False
+                ).permute(0,2,3,1)
+                
                 for k in range(EVAL_H-H):
                     pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs)
                     pred_latent = torch.cat([pred1[:,[-1]], pred2[:,[-1]]], dim=0)
@@ -414,8 +429,18 @@ def main():
                     inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
                     states = torch.cat([states[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
                 
-                gt_im1 = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device)
-                gt_im2 = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device)
+                gt_im1_raw = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device)
+                gt_im2_raw = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device)
+                
+                gt_im1 = torch.nn.functional.interpolate(
+                    gt_im1_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                    mode='bilinear', align_corners=False
+                ).permute(0,2,3,1)
+                gt_im2 = torch.nn.functional.interpolate(
+                    gt_im2_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                    mode='bilinear', align_corners=False
+                ).permute(0,2,3,1)
+                
                 gt_fail = eval_data['failure'][[0], :EVAL_H].squeeze().to(device)
                 
                 for j in range(EVAL_H):

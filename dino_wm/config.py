@@ -16,7 +16,7 @@ MODEL_CONFIG = {
 
 # Decoder-specific configuration
 DECODER_CONFIG = {
-    'decoder_image_size': (224, 224), # NOTE: change to 256, 256 if you want to use the original decoder
+    'decoder_image_size': (224, 224),  # Decoder was trained to output 224x224
     'codebook_size': 2048,             # VQ-VAE codebook size (number of embeddings in the discrete vocabulary)
 }
 
