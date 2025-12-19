@@ -29,16 +29,16 @@ container="${repo_dir}/container/${repo}_arm64.sif"
 # Training parameters (easily configurable)
 HDF5_FILE="${data_dir}/cubes_push_labeled_combined.h5"
 DATASET_STATS="${data_dir}/cubes_push_labeled_dataset_stats.json"
-DECODER_CHECKPOINT="${data_dir}/dino_decoder_checkpoints/testing_decoder.pth"
-WM_CHECKPOINT="${data_dir}/dino_wm_checkpoints/best_wm.pth"
+DECODER_CHECKPOINT="${repo_dir}/dino_decoder_checkpoints/testing_decoder.pth"
+WM_CHECKPOINT="${repo_dir}/dino_wm_checkpoints/best_wm.pth"
 BATCH_SIZE=64
 SEQUENCE_LENGTH=16
 WANDB_PROJECT="latent-safety"
 WANDB_NAME="cubes_push_classifier"
-CHECKPOINT_DIR="${data_dir}/dino_wm_checkpoints"
+CHECKPOINT_DIR="${repo_dir}/dino_wm_checkpoints"
 
 # Create logs directory if it doesn't exist
-mkdir -p "${data_dir}/logs"
+mkdir -p "${repo_dir}/logs"
 
 start_time="$(date -Is --utc)"
 
