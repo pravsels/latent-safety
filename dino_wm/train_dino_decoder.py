@@ -80,6 +80,18 @@ def main():
         help="Number of training iterations (default: 5000).",
     )
     parser.add_argument(
+        "--eval-every",
+        type=int,
+        default=100,
+        help="Run evaluation every N iterations (default: 100).",
+    )
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=100,
+        help="Save a latest checkpoint every N iterations for preemption-safe resume (default: 100).",
+    )
+    parser.add_argument(
         "--checkpoint-dir",
         type=str,
         default="dino_decoder_checkpoints",
@@ -117,10 +129,15 @@ def main():
         help="Path to a checkpoint to resume training from.",
     )
     parser.add_argument(
+        "--auto-resume",
+        action="store_true",
+        help="If set, automatically resume from the latest checkpoint in --checkpoint-dir (if present).",
+    )
+    parser.add_argument(
         "--start-iter",
         type=int,
-        default=0,
-        help="Iteration to start training from (default: 0).",
+        default=None,
+        help="Iteration to start training from. If omitted and resuming from a checkpoint that stores 'iter', it will resume from there.",
     )
     parser.add_argument(
         "--quantize",
@@ -140,6 +157,7 @@ def main():
     hdf5_file = args.hdf5_file
     H = 1
     BS = args.batch_size
+    run_suffix = "_vq" if args.quantize else ""
 
     # Determine train/test split via percentage, with minimum of 1 trajectory
     # in the smaller split when possible.
@@ -181,41 +199,71 @@ def main():
     else:
         print("VQ codebook quantization disabled (standard autoencoder)")
     
-    if args.resume_checkpoint is not None:
-        print(f"Resuming from checkpoint: {args.resume_checkpoint}")
-        ckpt = torch.load(args.resume_checkpoint, map_location=device)
-        # Handle both old (state_dict) and new (dict with model_state_dict) formats
-        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-            decoder.load_state_dict(ckpt['model_state_dict'])
-        else:
-            decoder.load_state_dict(ckpt)
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
 
-    print('decoder with parameters', count_parameters(decoder))
-    
+    # Paths:
+    # - testing_decoder*.pth remains a plain state_dict for backward compatibility with older scripts.
+    # - latest_decoder*.pth is a richer dict checkpoint for preemption-safe resume (model+optimizer+iter).
+    latest_state_dict_path = os.path.join(args.checkpoint_dir, f"testing_decoder{run_suffix}.pth")
+    latest_ckpt_path = os.path.join(args.checkpoint_dir, f"latest_decoder{run_suffix}.pth")
+    best_ckpt_path = os.path.join(args.checkpoint_dir, f"best_decoder{run_suffix}.pth")
+
+    # Resolve resume path.
+    resume_path = args.resume_checkpoint
+    if resume_path is None and args.auto_resume and os.path.exists(latest_ckpt_path):
+        resume_path = latest_ckpt_path
+
     optimizer = AdamW([
         {'params': decoder.parameters(), 'lr': 3e-4}
     ])
 
-    # Load best_eval from existing best checkpoint to persist across sessions
-    best_eval = float('inf')
-    best_ckpt_path = os.path.join(args.checkpoint_dir, 'best_decoder.pth')
+    # best_eval is tracked and persisted via best checkpoint when available
+    best_eval = float("inf")
     if os.path.exists(best_ckpt_path):
         best_ckpt = torch.load(best_ckpt_path, map_location=device)
-        if isinstance(best_ckpt, dict) and 'best_eval' in best_ckpt:
-            best_eval = best_ckpt['best_eval']
+        if isinstance(best_ckpt, dict) and "best_eval" in best_ckpt:
+            best_eval = best_ckpt["best_eval"]
             print(f"Loaded previous best eval: {best_eval:.4f}")
+
+    # Resume (supports legacy state_dict-only checkpoints and newer dict checkpoints).
+    start_iter_from_ckpt = None
+    if resume_path is not None:
+        print(f"Resuming from checkpoint: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+            decoder.load_state_dict(ckpt["model_state_dict"])
+            if "optimizer_state_dict" in ckpt:
+                try:
+                    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                except Exception as e:
+                    print(f"Warning: failed to load optimizer state ({e}); continuing with fresh optimizer.")
+            if "iter" in ckpt:
+                start_iter_from_ckpt = int(ckpt["iter"]) + 1
+            if "best_eval" in ckpt and best_eval == float("inf"):
+                best_eval = ckpt["best_eval"]
+        else:
+            # Legacy checkpoints may just be a raw state_dict
+            decoder.load_state_dict(ckpt)
+
+    print('decoder with parameters', count_parameters(decoder))
     
     iters = []
     train_losses = []
     eval_losses = []
     train_iter = args.train_iters
     start_iter = args.start_iter
+    if start_iter is None:
+        start_iter = start_iter_from_ckpt or 0
+    if start_iter_from_ckpt is not None:
+        # start_iter_from_ckpt is stored as (ckpt_iter + 1)
+        print(f"Auto-resume: continuing from iter {start_iter} (loaded iter={start_iter - 1} from checkpoint).")
     for i in range(start_iter, train_iter):
-        if i > 0 and i % len(expert_loader) == 0:
+        # Refresh iterators when they exhaust (avoids relying on len() of iterator).
+        try:
+            data = next(expert_loader)
+        except StopIteration:
             expert_loader = iter(DataLoader(expert_data, batch_size=BS, shuffle=True))
-        if i > 0 and i % len(expert_loader_eval) == 0:
-            expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
-        data = next(expert_loader)
+            data = next(expert_loader)
 
         inputs1 = data["cam_zed_embd"].to(device)
         inputs2 = data["cam_rs_embd"].to(device)
@@ -271,11 +319,28 @@ def main():
         optimizer.step()
         wandb.log({'train_loss': loss.item()})
         print(f"\rIter {i}, Train Loss: {loss.item():.4f}", end='', flush=True)
+
+        # Periodic "latest" checkpoint for HPC preemption / manual restarts.
+        if args.save_every and (i % args.save_every == 0):
+            torch.save(
+                {
+                    "model_state_dict": decoder.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "iter": i,
+                    "best_eval": best_eval.item() if hasattr(best_eval, "item") else best_eval,
+                    "quantize": bool(args.quantize),
+                },
+                latest_ckpt_path,
+            )
         
-        if i % 100 == 0:
+        if args.eval_every and (i % args.eval_every == 0):
             train_losses.append(loss.item())
             iters.append(i)
-            eval_data = next(expert_loader_eval)
+            try:
+                eval_data = next(expert_loader_eval)
+            except StopIteration:
+                expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
+                eval_data = next(expert_loader_eval)
             decoder.eval()
             with torch.no_grad():
                 inputs1 = eval_data["cam_zed_embd"].to(device)
@@ -337,14 +402,24 @@ def main():
             print(f"\rIter {i}, Eval Loss: {loss.item():.4f}")
             if loss < best_eval:
                 best_eval = loss
-                os.makedirs(args.checkpoint_dir, exist_ok=True)
-                # Save regular checkpoint for backward compatibility
-                torch.save(decoder.state_dict(), os.path.join(args.checkpoint_dir, 'testing_decoder.pth'))
+                # Save backward-compatible latest weights (state_dict)
+                torch.save(decoder.state_dict(), latest_state_dict_path)
+                # Save rich "latest" checkpoint for restart/resume
+                torch.save(
+                    {
+                        "model_state_dict": decoder.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "iter": i,
+                        "best_eval": best_eval.item() if hasattr(best_eval, "item") else best_eval,
+                        "quantize": bool(args.quantize),
+                    },
+                    latest_ckpt_path,
+                )
                 # Save best checkpoint with metadata to persist best_eval across sessions
                 torch.save({
                     'model_state_dict': decoder.state_dict(),
                     'best_eval': best_eval.item() if hasattr(best_eval, 'item') else best_eval
-                }, os.path.join(args.checkpoint_dir, 'best_decoder.pth'))
+                }, best_ckpt_path)
             decoder.train()
             
             out_log = (output1_bhwc[0].detach().cpu().numpy())
@@ -360,7 +435,7 @@ def main():
     plt.plot(iters, eval_losses, label='eval')
     plt.legend()
     os.makedirs(args.checkpoint_dir, exist_ok=True)
-    plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
+    plt.savefig(os.path.join(args.checkpoint_dir, f'training_curve{run_suffix}.png'))
 
     best_eval_val = best_eval.item() if hasattr(best_eval, 'item') else best_eval
     print(f"\nTraining complete. Best eval loss: {best_eval_val:.4f}")
