@@ -2,27 +2,41 @@
 """
 Train the DINO decoder (VQVAE) to reconstruct both cameras from DINO patch embeddings.
 
-Quickstart:
+Quickstart (run from repo root):
 
-  # Standard autoencoder (no quantization)
-  python dino_wm/train_dino_decoder.py \
+  # Standard autoencoder (no quantization), resume from latest checkpoint in checkpoint-dir
+  python -u dino_wm/train_dino_decoder.py \
     --hdf5-file ${data_dir}/arx5_subset_train.h5 \
-    --resume-checkpoint dino_decoder_checkpoints/testing_decoder.pth \
-    --start-iter 2300 \
-    --batch-size 256
-
-  # With VQ codebook quantization enabled
-  python dino_wm/train_dino_decoder.py \
-    --hdf5-file ${data_dir}/arx5_subset_train.h5 \
-    --resume-checkpoint dino_decoder_checkpoints/testing_decoder.pth \
-    --start-iter 2300 \
     --batch-size 256 \
-    --quantize
+    --checkpoint-dir ${data_dir}/dino_decoder_checkpoints \
+    --wandb-mode offline \
+    --auto-resume
+
+  # With VQ codebook quantization enabled (writes *_vq checkpoints/plots)
+  python -u dino_wm/train_dino_decoder.py \
+    --hdf5-file ${data_dir}/arx5_subset_train.h5 \
+    --batch-size 256 \
+    --checkpoint-dir ${data_dir}/dino_decoder_checkpoints \
+    --wandb-mode offline \
+    --quantize \
+    --auto-resume
+
+Notes:
+  - Non-quantized outputs: testing_decoder.pth / latest_decoder.pth / best_decoder.pth / training_curve.png
+  - Quantized outputs:     testing_decoder_vq.pth / latest_decoder_vq.pth / best_decoder_vq.pth / training_curve_vq.png
+  - Use --eval-every and --save-every to control evaluation and checkpoint frequency.
 """
+
+import os
+import sys
+# Ensure repo root is on sys.path regardless of current working directory.
+# This makes `import dino_wm.*` work when running via `python dino_wm/train_dino_decoder.py`.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import argparse
 import h5py
-import os
 import torch
 import wandb
 from torch import nn
@@ -32,8 +46,8 @@ from einops import rearrange
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
-from test_loader import SplitTrajectoryDataset
-from dino_decoder import VQVAE
+from dino_wm.test_loader import SplitTrajectoryDataset
+from dino_wm.dino_decoder import VQVAE
 from dino_wm.config import MODEL_CONFIG, DECODER_CONFIG, TRAIN_CONFIG
 
 def count_parameters(model):

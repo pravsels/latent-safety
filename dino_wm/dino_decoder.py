@@ -2,8 +2,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+import os
 import sys
-sys.path.append('..')
+# Ensure repo root is on sys.path regardless of current working directory.
+# This makes `import dino_wm.*` work when running scripts via `python dino_wm/<script>.py` under SLURM/Apptainer.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 from einops import rearrange
 from torchvision import transforms
 from dino_wm.config import MODEL_CONFIG, DECODER_CONFIG
