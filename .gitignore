@@ -8,6 +8,8 @@ checkpoints/
 wandb/
 *.h5
 
+failure_head_*/
+
 logs/
 *.out
 *.pkl 

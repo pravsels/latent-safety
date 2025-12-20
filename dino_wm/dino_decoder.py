@@ -42,19 +42,39 @@ class Quantize(nn.Module):
         self.register_buffer("embed_avg", embed.clone())
 
     def forward(self, input):
+        # Flatten the input to (N, E) where N is the number of latents and E is the dimension of the latent.
         flatten = input.reshape(-1, self.dim)
+
+        # Compute squared L2 distances from each latent x (N,E) to each codebook vector e_j (E,).
+        # Note: codebook is stored transposed as embed=(E,K), so flatten@embed gives (N,K) dot products.
+        # ||x - e||^2 = ||x||^2 - 2 x*e + ||e||^2
+        # Shapes: flatten=(N,E), embed=(E,K) so dist=(N,K)
         dist = (
             flatten.pow(2).sum(1, keepdim=True)
             - 2 * flatten @ self.embed
             + self.embed.pow(2).sum(0, keepdim=True)
         )
-        _, embed_ind = (-dist).max(1)
-        embed_onehot = F.one_hot(embed_ind, self.n_embed).type(flatten.dtype)
+
+        # dist: (N, K) squared distances from each latent to each codebook entry.
+        # Pick nearest code for each latent (argmin over K).
+        _, embed_ind = dist.min(1)  # embed_ind: (N,) values in [0, K-1]
+
+        # One-hot assignments, used for EMA codebook updates.
+        embed_onehot = F.one_hot(embed_ind, self.n_embed).type(flatten.dtype)  # (N, K)
+
+        # Reshape indices back to the spatial layout (all dims except the embedding dim).
+        # If input is (B*T, H, W, E), this becomes (B*T, H, W).
         embed_ind = embed_ind.view(*input.shape[:-1])
-        quantize = self.embed_code(embed_ind)
+
+        # Look up the actual embedding vectors for each index -> quantized latents with same shape as input.
+        quantize = self.embed_code(embed_ind)  # (B*T, H, W, E)
 
         if self.training:
+            # embed_onehot is N embeds and K codes
+            # if we collapse this along the row dimension, we get the number of times each code is used.
             embed_onehot_sum = embed_onehot.sum(0)
+            # Sum latents per code: (E, N) @ (N, K) -> (E, K)
+            # Column j is sum of all latent vectors assigned to code j.
             embed_sum = flatten.transpose(0, 1) @ embed_onehot
 
             # Distributed training support (if available)
@@ -70,6 +90,7 @@ class Quantize(nn.Module):
                 embed_onehot_sum, alpha=1 - self.decay
             )
             self.embed_avg.data.mul_(self.decay).add_(embed_sum, alpha=1 - self.decay)
+            
             n = self.cluster_size.sum()
             cluster_size = (
                 (self.cluster_size + self.eps) / (n + self.n_embed * self.eps) * n
@@ -83,6 +104,8 @@ class Quantize(nn.Module):
         return quantize, diff, embed_ind
 
     def embed_code(self, embed_id):
+        # embed is stored as (E, K) for fast matmuls; F.embedding expects weight as (K, E),
+        # so we transpose to look up code vectors by integer indices.
         return F.embedding(embed_id, self.embed.transpose(0, 1))
 
 
