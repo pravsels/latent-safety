@@ -47,7 +47,8 @@ class Quantize(nn.Module):
         self.register_buffer("embed_avg", embed.clone())
 
     def forward(self, input):
-        # Flatten the input to (N, E) where N is the number of latents and E is the dimension of the latent.
+        # input is a grid of per-patch latents (e.g., (B*T, H, W, E) where H*W = num_patches).
+        # We flatten the grid into N= (B*T*H*W) independent latents so we can do a single (N,E) x (E,K) matmul.
         flatten = input.reshape(-1, self.dim)
 
         # Compute squared L2 distances from each latent x (N,E) to each codebook vector e_j (E,).
@@ -91,19 +92,38 @@ class Quantize(nn.Module):
                 # Single-device training: no-op
                 pass
 
+            # --- EMA codebook update (VectorQuantizer-EMA) ---
+            # embed_onehot_sum: (K,)  batch counts per code (how many latents picked each code)
+            # embed_sum:        (E,K) batch sum of assigned latent vectors per code
+            #
+            # We maintain exponential moving averages:
+            # - cluster_size: (K,)  EMA counts per code
+            # - embed_avg:    (E,K) EMA sums per code
+            # These are treated as state (not optimized by gradients), hence `.data` in-place updates.
             self.cluster_size.data.mul_(self.decay).add_(
                 embed_onehot_sum, alpha=1 - self.decay
-            )
-            self.embed_avg.data.mul_(self.decay).add_(embed_sum, alpha=1 - self.decay)
-            
+            )  # cluster_size = decay * cluster_size + (1-decay) * batch_counts
+
+            self.embed_avg.data.mul_(self.decay).add_(
+                embed_sum, alpha=1 - self.decay
+            )  # embed_avg = decay * embed_avg + (1-decay) * batch_sums
+
+            # Normalize counts with eps (avoids divide-by-zero / dead codes) and keep total mass stable.
             n = self.cluster_size.sum()
             cluster_size = (
                 (self.cluster_size + self.eps) / (n + self.n_embed * self.eps) * n
             )
+
+            # Convert EMA sums -> EMA means per code: (E,K) / (1,K) -> (E,K)
             embed_normalized = self.embed_avg / cluster_size.unsqueeze(0)
+
+            # Update the actual codebook vectors (E,K) to these EMA means.
             self.embed.data.copy_(embed_normalized)
 
+        # MSE between encoder latents and their quantized versions (commitment / matching term).
         diff = (quantize.detach() - input).pow(2).mean()
+
+        # Straight-through trick: forward uses quantized values, backward passes gradients as if quantize==input.
         quantize = input + (quantize - input).detach()
 
         return quantize, diff, embed_ind
