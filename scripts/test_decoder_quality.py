@@ -2,19 +2,16 @@
 """
 Test decoder quality by comparing original images with decoded DINOv2 embeddings.
 
-Usage:
+Quickstart (one command):
     python scripts/test_decoder_quality.py \
-            --decoder-checkpoint dino_decoder_checkpoints/testing_decoder.pth \
-            --image-path path/to/image.jpg \
-            --output-dir test_decoder_results \
-            --num-images 10
+        --decoder-checkpoint dino_decoder_checkpoints/best_decoder_vq.pth \
+        --hdf5-file arx5_10traj.h5 \
+        --output-dir test_decoder_results \
+        --num-images 10
 
-Or test with images from HDF5:
-    python scripts/test_decoder_quality.py \
-            --decoder-checkpoint dino_decoder_checkpoints/testing_decoder.pth \
-            --hdf5-file arx5_10traj.h5 \
-            --output-dir test_decoder_results \
-            --num-images 10
+Notes:
+  - Quantization is auto-detected from the checkpoint metadata / filename (e.g. *_vq.pth).
+  - To test a single image instead, replace `--hdf5-file ...` with `--image-path path/to/image.jpg`.
 """
 
 import argparse
@@ -37,6 +34,41 @@ from dino_wm.config import MODEL_CONFIG
 from scripts.utils import get_dino_model, preprocess_images_for_dino
 from dino_wm.test_loader import SplitTrajectoryDataset
 from torch.utils.data import DataLoader
+
+
+def _load_decoder_checkpoint(path: str, device: str):
+    """
+    Load decoder checkpoint from either:
+      - raw state_dict (legacy)
+      - dict checkpoint containing "model_state_dict" (+ optional metadata)
+    Returns:
+      (state_dict, meta_dict)
+    """
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        meta = {k: v for k, v in ckpt.items() if k != "model_state_dict"}
+        return ckpt["model_state_dict"], meta
+    # Otherwise assume it's already a raw state_dict
+    return ckpt, {}
+
+
+def _resolve_quantize_flag(user_quantize, ckpt_meta: dict, checkpoint_path: str) -> bool:
+    """
+    Decide whether to enable VQ codebook quantization.
+
+    Precedence:
+      1) explicit CLI override (True)
+      2) checkpoint metadata key "quantize" (when present)
+      3) filename heuristic: "_vq" in basename
+      4) default False
+    """
+    if user_quantize is True:
+        return True
+    if isinstance(ckpt_meta, dict) and "quantize" in ckpt_meta:
+        return bool(ckpt_meta["quantize"])
+    if "_vq" in os.path.basename(checkpoint_path):
+        return True
+    return False
 
 
 def extract_dino_features(images, dino_model, device, is_front_camera=False):
@@ -160,8 +192,12 @@ def main():
                        help="Device to use (default: cuda:0)")
     parser.add_argument("--camera-type", type=str, default="wrist", choices=["front", "wrist"],
                        help="Camera type for preprocessing (default: wrist)")
-    parser.add_argument("--quantize", action="store_true",
-                       help="Enable VQ codebook quantization (must match training setting)")
+    parser.add_argument(
+        "--quantize",
+        action="store_true",
+        default=None,
+        help="Enable VQ codebook quantization. If omitted, auto-detected from checkpoint metadata / filename.",
+    )
     
     args = parser.parse_args()
     
@@ -170,12 +206,22 @@ def main():
     
     # Load decoder
     print("Loading decoder...")
-    decoder = VQVAE(quantize=args.quantize).to(device)
-    if args.quantize:
+    state_dict, ckpt_meta = _load_decoder_checkpoint(args.decoder_checkpoint, device)
+    quantize = _resolve_quantize_flag(args.quantize, ckpt_meta, args.decoder_checkpoint)
+    decoder = VQVAE(quantize=quantize).to(device)
+    if quantize:
         print("VQ codebook quantization enabled")
     else:
         print("VQ codebook quantization disabled (standard autoencoder)")
-    decoder.load_state_dict(torch.load(args.decoder_checkpoint, map_location=device, weights_only=False))
+    try:
+        decoder.load_state_dict(state_dict)
+    except RuntimeError as e:
+        # Usually indicates quantize mismatch (missing/extra keys for codebook buffers/params).
+        raise RuntimeError(
+            f"Failed to load decoder checkpoint '{args.decoder_checkpoint}'. "
+            f"Resolved quantize={quantize}. "
+            f"If this is wrong, pass --quantize or --no-quantize explicitly.\n\nOriginal error:\n{e}"
+        ) from e
     decoder.eval()
     
     # Load DINO model
