@@ -117,13 +117,54 @@ def smoke_test_decoder(device: str) -> None:
     print("[Decoder] PASSED")
 
 
+def smoke_test_video_transformer(device: str) -> None:
+    """Test VideoTransformer for both v2 and v3 patch configurations."""
+    from dino_wm.dino_models import VideoTransformer
+    from dino_wm import config
+
+    print("\n[VideoTransformer] Testing both v2 and v3 configurations...")
+
+    original_version = config.DINO_VERSION
+
+    for version in ['v2', 'v3']:
+        config.DINO_VERSION = version
+        patches = config.get_dino_config()['num_patches']
+
+        model = VideoTransformer(
+            image_size=(224, 224),
+            dim=384,
+            action_embed_dim=10,
+            state_embed_dim=10,
+            state_dim=8,
+            action_dim=7,
+            depth=6,
+            heads=16,
+            mlp_dim=2048,
+            num_frames=4,
+            device=device
+        ).to(device)
+
+        video1 = torch.randn(2, 4, patches, 384, device=device)
+        video2 = torch.randn(2, 4, patches, 384, device=device)
+        states = torch.randn(2, 4, 8, device=device)
+        actions = torch.randn(2, 4, 7, device=device)
+
+        out = model.forward_features(video1, video2, states, actions)
+        expected = (2, 4, patches, 788)
+        assert out.shape == expected, f"{version} expected {expected}, got {out.shape}"
+        print(f"[VideoTransformer for DINO{version}] num_patches: {model.num_patches}, output: {tuple(out.shape)}")
+
+    config.DINO_VERSION = original_version
+    print("[VideoTransformer] PASSED")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Smoke test DINO vision encoders")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
     parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
     parser.add_argument("--height", type=int, default=224, help="Image height")
     parser.add_argument("--width", type=int, default=224, help="Image width")
-    parser.add_argument("--version", type=str, default="all", choices=["v2", "v3", "all", "compare", "decoder"],
+    parser.add_argument("--version", type=str, default="all", choices=["v2", "v3", "all", "compare", "decoder", "transformer"],
                         help="Which version to test")
     args = parser.parse_args()
 
@@ -147,6 +188,9 @@ def main():
 
         if args.version == "decoder":
             smoke_test_decoder(args.device)
+
+        if args.version == "transformer":
+            smoke_test_video_transformer(args.device)
 
         print("\n" + "="*50)
         print("ALL SMOKE TESTS PASSED")
