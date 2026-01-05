@@ -76,3 +76,4 @@ Trajectories stored as HDF5 files with structure:
 ## Preferences
 
 - **Commits**: Use concise, single-line commit messages
+- **Edits**: Scope changes to one module at a time. Keep diffs reviewable.

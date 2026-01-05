@@ -30,8 +30,14 @@ from tqdm import tqdm, trange
 from model_based_irl_torch.common.utils import to_np
 import wandb
 from torch.utils.data import Dataset, DataLoader
+from dino_wm.config import get_dino_config
 
-dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg')
+dino_cfg = get_dino_config()
+if 'hub_source' in dino_cfg:
+    dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name'],
+                          source=dino_cfg['hub_source'], weights=dino_cfg['weights_path'])
+else:
+    dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name'])
 
 import requests
 from PIL import Image

@@ -4,7 +4,7 @@ import torch
 import numpy as np
 from torchvision import transforms
 from PIL import Image
-from dino_wm.config import MODEL_CONFIG
+from dino_wm.config import MODEL_CONFIG, get_dino_config
 
 # --- Monkeypatch for LeRobot Dataset ---
 # Fixes "ValueError: too many dimensions 'str'" when loading datasets with string columns
@@ -31,11 +31,15 @@ lerobot.datasets.lerobot_dataset.hf_transform_to_torch = safe_hf_transform_to_to
 # --- Transforms & Model ---
 
 def get_dino_model(device: str):
-    print(f"Loading DINOv2 model on {device}...")
-    # Suppress xformers warning
+    dino_cfg = get_dino_config()
+    print(f"Loading {dino_cfg['model_name']} on {device}...")
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="xFormers is not available")
-        model = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14_reg").to(device)
+        if 'hub_source' in dino_cfg:
+            model = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name'],
+                                   source=dino_cfg['hub_source'], weights=dino_cfg['weights_path']).to(device)
+        else:
+            model = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name']).to(device)
     model.eval()
     return model
 

@@ -10,7 +10,7 @@ from einops.layers.torch import Rearrange
 from typing import Tuple, Optional
 from torchvision import transforms
 from scipy.spatial.transform import Rotation
-from dino_wm.config import MODEL_CONFIG
+from dino_wm.config import MODEL_CONFIG, get_dino_config
 
 
 def batch_quat_to_rotvec(quaternions):
@@ -107,12 +107,14 @@ class ResidualBlock2(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, in_channels=None, out_channels=3):
         super(Decoder, self).__init__()
-        
+
         # Use MODEL_CONFIG['dim'] as default if not specified
         if in_channels is None:
             in_channels = MODEL_CONFIG['dim']
-        
+
         self.in_channels = in_channels
+        dino_cfg = get_dino_config()
+        self.grid_size = int(dino_cfg['num_patches'] ** 0.5)  # 16 for v2, 14 for v3
         
         # Two residual blocks
         self.residual_blocks = nn.Sequential(
@@ -123,7 +125,7 @@ class Decoder(nn.Module):
 
         )
         
-        # Three transposed convolutions to go from 16x16 to 224x224
+        # Transposed convolutions to go from grid (16x16 or 14x14) to image size (224x224)
         self.transposed_convs = nn.Sequential(
             nn.ConvTranspose2d(in_channels, in_channels, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
@@ -151,7 +153,7 @@ class Decoder(nn.Module):
     
     def forward(self, x):
 
-        x = x.view(-1, 16, 16, self.in_channels)  # Reshape to (16, 16, dim) where 16x16 is the spatial grid
+        x = x.view(-1, self.grid_size, self.grid_size, self.in_channels)  # Reshape to spatial grid
         x = x.permute(0, 3, 1, 2)        # Pass through residual blocks
         x = self.residual_blocks(x)
         # Pass through transposed convolutions
@@ -285,7 +287,13 @@ class VideoTransformer(nn.Module):
         super().__init__()
         
         self.device = device
-        self.dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg').to(device)
+        dino_cfg = get_dino_config()
+        if 'hub_source' in dino_cfg:
+            self.dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name'],
+                                       source=dino_cfg['hub_source'], weights=dino_cfg['weights_path']).to(device)
+        else:
+            self.dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name']).to(device)
+        self.num_patches = dino_cfg['num_patches']
         
         # Improved action embedding
         self.action_encoder = nn.Sequential(
@@ -308,7 +316,7 @@ class VideoTransformer(nn.Module):
         ).to(device)
         
         total_dim = 2*dim + action_embed_dim + state_embed_dim
-        self.pos_embedding = nn.Parameter(torch.randn(1, 256, total_dim) * 0.02)  # Spatial: patch position within frame
+        self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, total_dim) * 0.02)  # Spatial: patch position within frame
         self.temp_embedding = nn.Parameter(torch.randn(1, num_frames, total_dim) * 0.02)  # Temporal: frame position in sequence
         
         self.dropout = nn.Dropout(emb_dropout)
@@ -377,8 +385,8 @@ class VideoTransformer(nn.Module):
         actions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Encode actions and states
-        action_embeddings = self.action_encoder(actions).unsqueeze(2).expand(-1, -1, 256, -1)
-        state_embeddings = self.state_encoder(states).unsqueeze(2).expand(-1, -1, 256, -1)
+        action_embeddings = self.action_encoder(actions).unsqueeze(2).expand(-1, -1, self.num_patches, -1)
+        state_embeddings = self.state_encoder(states).unsqueeze(2).expand(-1, -1, self.num_patches, -1)
         
         # Combine features
         batch_size, num_frames, _, _ = video1.shape

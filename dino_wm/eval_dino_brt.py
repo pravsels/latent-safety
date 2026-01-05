@@ -31,7 +31,14 @@ from model_based_irl_torch.common.utils import to_np
 import wandb
 from test_loader import SplitTrajectoryDataset
 from torch.utils.data import DataLoader
-dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg')
+from dino_wm.config import get_dino_config
+
+dino_cfg = get_dino_config()
+if 'hub_source' in dino_cfg:
+    dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name'],
+                          source=dino_cfg['hub_source'], weights=dino_cfg['weights_path'])
+else:
+    dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name'])
 saferl_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../Lipschitz_Continuous_Reachability_Learning'))
 sys.path.append(saferl_dir)
 import gymnasium #as gym

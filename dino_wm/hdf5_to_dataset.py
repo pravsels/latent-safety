@@ -18,7 +18,7 @@ from scipy.spatial.transform import Rotation as R
 from torchvision import transforms
 import torchvision.transforms.functional as F
 from tqdm import tqdm
-from dino_wm.config import MODEL_CONFIG
+from dino_wm.config import MODEL_CONFIG, get_dino_config
 
 # Image transforms
 
@@ -90,7 +90,12 @@ def eef_pose_to_state(T, gripper):
 
 def preprocess(demo_path: str, device: str = "cuda:0"):
     # Load DINO model
-    dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14_reg").to(device)
+    dino_cfg = get_dino_config()
+    if 'hub_source' in dino_cfg:
+        dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name'],
+                              source=dino_cfg['hub_source'], weights=dino_cfg['weights_path']).to(device)
+    else:
+        dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name']).to(device)
 
     # Path to HDF5 files
     hdf5_files = [
