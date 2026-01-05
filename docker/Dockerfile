@@ -34,10 +34,15 @@ RUN set -eux; \
     python -m pip install -v torch==2.6 torchvision --index-url https://download.pytorch.org/whl/cu126 && \
     python -m pip install -v wandb
 
-COPY . .
+# Copy packages (copied to build context by docker_build.sh)
+COPY dinov3 /workspace/dinov3
+COPY latent_safety /workspace/latent_safety
 
-# install the package
-RUN python -m pip install -v .
+# Install dinov3
+RUN python -m pip install -v -e /workspace/dinov3
+
+# Install latent_safety
+RUN python -m pip install -v -e /workspace/latent_safety
 
 CMD ["/bin/bash"]
 
