@@ -3,7 +3,7 @@ Global configuration for DINO World Model.
 """
 
 # DINO Version Selection
-DINO_VERSION = 'v3'  # 'v2' or 'v3'
+DINO_VERSION = 'v2'  # 'v2' or 'v3'
 
 DINOV2_CONFIG = {
     'hub_repo': 'facebookresearch/dinov2',
