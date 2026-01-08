@@ -27,9 +27,11 @@ from tqdm import tqdm
 try:
     from scripts.utils import get_dino_model, preprocess_images_for_dino, to_hwc_uint8
     import scripts.utils
+    import dino_wm.config as dino_config
 except ImportError:
     from utils import get_dino_model, preprocess_images_for_dino, to_hwc_uint8
     import utils 
+    import dino_wm.config as dino_config
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # Global flag for graceful shutdown
@@ -362,7 +364,13 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--resume", action="store_true", 
                        help="Resume from existing file (append mode)")
+    parser.add_argument("--dino-version", type=str, choices=['v2', 'v3'], default='v3',
+                       help="DINO version to use for embeddings (default: v3)")
     args = parser.parse_args()
+
+    # Set DINO version in config
+    print(f"🔧 Using DINO_VERSION: {args.dino_version}")
+    dino_config.DINO_VERSION = args.dino_version
 
     # Setup signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
