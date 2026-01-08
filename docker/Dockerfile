@@ -29,10 +29,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /workspace
 
-# Install PyTorch explicitly
+# Install PyTorch, wandb, lerobot and pinned dependencies
 RUN set -eux; \
     python -m pip install -v torch==2.6 torchvision --index-url https://download.pytorch.org/whl/cu126 && \
-    python -m pip install -v wandb
+    python -m pip install -v wandb lerobot==0.3.3 "numpy==1.26.4" "gymnasium==0.28.1" torchmetrics timm scipy
 
 # Copy packages (copied to build context by docker_build.sh)
 COPY dinov3 /workspace/dinov3
