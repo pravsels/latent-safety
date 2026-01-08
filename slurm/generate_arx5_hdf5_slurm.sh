@@ -17,6 +17,7 @@ repo_dir="${home_dir}/latent_safety"
 scratch_dir="/scratch/u5dm/pravsels.u5dm/latent_safety"
 container="${scratch_dir}/container/latent_safety_arm64.sif"
 HF_CACHE="/scratch/u5dm/pravsels.u5dm/huggingface_cache"
+SCRATCH_WEIGHTS="/scratch/u5dm/pravsels.u5dm/latent_safety/weights"
 
 # Input/Output config
 DATASETS_LIST="${repo_dir}/arx5_datasets_new.json"
@@ -42,6 +43,7 @@ apptainer exec --nv \
     --bind "${scratch_dir}:${scratch_dir}" \
     --bind "${home_dir}:${home_dir}" \
     --bind "${HF_CACHE}:/root/.cache/huggingface" \
+    --bind "${SCRATCH_WEIGHTS}:${repo_dir}/weights" \
     --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
     bash -c "export PYTHONPATH=${repo_dir}:\$PYTHONPATH && ${GEN_CMD}"
