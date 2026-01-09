@@ -28,22 +28,29 @@ DINOV3_CONFIG = {
 def get_dino_config():
     return DINOV3_CONFIG if DINO_VERSION == 'v3' else DINOV2_CONFIG
 
-def get_decoder_image_size() -> tuple[int, int]:
+# Decoder architecture constant: total spatial upsampling factor (stride=4 twice -> 4*4=16)
+DECODER_UPSAMPLE_FACTOR = 16
+
+def compute_decoder_image_size(dino_cfg: dict) -> tuple[int, int]:
     """
     Decoder output size implied by the DINO patch grid and the decoder architecture.
 
     The decoder operates on a sqrt(num_patches) x sqrt(num_patches) grid and upsamples
-    spatially by 16x (stride=4 decoder twice -> 4*4).
+    spatially by DECODER_UPSAMPLE_FACTOR (stride=4 decoder twice -> 4*4=16).
 
     - DINOv2: 16x16 patches -> 256x256
     - DINOv3: 14x14 patches -> 224x224
     """
-    num_patches = int(get_dino_config()["num_patches"])
+    num_patches = int(dino_cfg["num_patches"])
     side = int(math.isqrt(num_patches))
     if side * side != num_patches:
         raise ValueError(f"num_patches must be a perfect square. Got {num_patches}")
-    out = side * 16
+    out = side * DECODER_UPSAMPLE_FACTOR
     return (out, out)
+
+def get_decoder_image_size() -> tuple[int, int]:
+    """Convenience wrapper using the globally selected DINO_VERSION."""
+    return compute_decoder_image_size(get_dino_config())
 
 # Model Architecture
 MODEL_CONFIG = {

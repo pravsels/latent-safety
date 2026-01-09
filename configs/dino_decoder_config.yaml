@@ -8,6 +8,9 @@
 #     --auto-resume / --no-auto-resume
 #     --quantize / --no-quantize
 
+# DINO version (must match how embeddings were generated)
+dino_version: v3              # v2 (256 patches, 256x256 output) or v3 (196 patches, 224x224 output)
+
 # Data / splitting
 hdf5_file: arx5_datasets_new.h5
 num_test_trajectories: null

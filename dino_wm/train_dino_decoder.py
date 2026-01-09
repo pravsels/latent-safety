@@ -548,6 +548,13 @@ def main():
         default=1,
         help="Compute DINO-cycle loss every N train iterations when enabled (default: 1).",
     )
+    parser.add_argument(
+        "--dino-version",
+        type=str,
+        default="v3",
+        choices=["v2", "v3"],
+        help="DINO version used to generate embeddings (default: v2). v2=256 patches (256x256 output), v3=196 patches (224x224 output).",
+    )
     # Apply YAML config as defaults (CLI overrides because we parse after this).
     known_dests = {a.dest for a in parser._actions}
     for k, v in (cfg or {}).items():
@@ -562,6 +569,12 @@ def main():
     torch.manual_seed(int(args.seed))
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(args.seed))
+
+    # Override DECODER_CONFIG based on --dino-version (so YAML/CLI takes precedence over config.py default).
+    from dino_wm.config import DINOV2_CONFIG, DINOV3_CONFIG, compute_decoder_image_size
+    dino_cfg = DINOV3_CONFIG if args.dino_version == "v3" else DINOV2_CONFIG
+    DECODER_CONFIG["decoder_image_size"] = compute_decoder_image_size(dino_cfg)
+    print(f"DINO version: {args.dino_version} → decoder_image_size={DECODER_CONFIG['decoder_image_size']}")
 
     wandb.init(
         project=args.wandb_project,
