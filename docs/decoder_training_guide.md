@@ -45,3 +45,10 @@ If MSE results in blurry outputs, consider incorporating a **perceptual loss** (
 ### Generalization Baseline
 Always compare `train_loss` vs `eval_loss` across different trajectories. A significant gap indicates that the decoder is memorizing background details of specific runs rather than learning a general-purpose mapping from DINO features to pixels.
 
+## 4. Auto-Resume Caveats
+
+The trainer supports preemption-safe resuming via `--auto-resume`, but keep the following in mind:
+*   **WandB Runs:** A new WandB run is created on each restart (run IDs are not currently persisted).
+*   **Plateau Scheduler:** If using `--lr-schedule plateau`, the internal patience counter and best-loss tracker for the scheduler are reset upon resuming.
+*   **Data Shuffling:** The random seed is reset at startup, meaning the `DataLoader` shuffle sequence restarts from the beginning for the current epoch/iteration.
+
