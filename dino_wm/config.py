@@ -2,6 +2,8 @@
 Global configuration for DINO World Model.
 """
 
+import math
+
 # DINO Version Selection
 DINO_VERSION = 'v2'  # 'v2' or 'v3'
 
@@ -26,6 +28,23 @@ DINOV3_CONFIG = {
 def get_dino_config():
     return DINOV3_CONFIG if DINO_VERSION == 'v3' else DINOV2_CONFIG
 
+def get_decoder_image_size() -> tuple[int, int]:
+    """
+    Decoder output size implied by the DINO patch grid and the decoder architecture.
+
+    The decoder operates on a sqrt(num_patches) x sqrt(num_patches) grid and upsamples
+    spatially by 16x (stride=4 decoder twice -> 4*4).
+
+    - DINOv2: 16x16 patches -> 256x256
+    - DINOv3: 14x14 patches -> 224x224
+    """
+    num_patches = int(get_dino_config()["num_patches"])
+    side = int(math.isqrt(num_patches))
+    if side * side != num_patches:
+        raise ValueError(f"num_patches must be a perfect square. Got {num_patches}")
+    out = side * 16
+    return (out, out)
+
 # Model Architecture
 MODEL_CONFIG = {
     'image_size': (224, 224),         # Input image size for DINO / world model
@@ -40,7 +59,8 @@ MODEL_CONFIG = {
 
 # Decoder-specific configuration
 DECODER_CONFIG = {
-    'decoder_image_size': (256, 256),  # Decoder output size
+    # Decoder output size (kept consistent with selected DINO_VERSION)
+    'decoder_image_size': get_decoder_image_size(),
     'codebook_size': 2048,             # VQ-VAE codebook size (number of embeddings in the discrete vocabulary)
 }
 

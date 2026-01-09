@@ -1,0 +1,63 @@
+# Default configuration for training the DINO decoder.
+# Usage:
+#   python dino_wm/train_dino_decoder.py --config configs/dino_decoder_config.yaml
+#
+# Notes:
+# - CLI flags override values in this file.
+# - For booleans like auto_resume / quantize you can use either:
+#     --auto-resume / --no-auto-resume
+#     --quantize / --no-quantize
+
+# Data / splitting
+hdf5_file: arx5_datasets_new.h5
+num_test_trajectories: null
+test_frac: 0.2
+
+# Training
+batch_size: 256
+num_workers: 0            # DataLoader workers (0 = main process). Increase on CPU-heavy nodes to speed up HDF5 reads.
+pin_memory: true
+seed: 0                   # Controls train/test split shuffling and DataLoader shuffles.
+horizon: 1
+device: cuda:0
+train_iters: 5000
+eval_every: 100
+save_every: 100
+save_iter_checkpoints_every: 1000
+checkpoint_dir: dino_decoder_checkpoints
+
+# Resume behavior
+auto_resume: true
+resume_checkpoint: null
+start_iter: null
+
+# Decoder options
+quantize: false
+
+# WandB
+wandb_mode: offline        # online | offline | disabled
+wandb_project: dino-WM
+wandb_entity: pravsels
+wandb_name: Decoder
+
+# Optimizer / LR scheduling
+lr: 0.0003
+lr_min: 0.00001
+lr_warmup_iters: 100
+lr_schedule: cosine        # cosine | constant | plateau
+
+# ReduceLROnPlateau (used when lr_schedule: plateau)
+plateau_patience: 10
+plateau_factor: 0.5
+plateau_threshold: 0.0001
+plateau_cooldown: 0
+plateau_min_lr: null
+
+# Two-stage loss schedule (enabled automatically after eval_loss plateaus)
+perceptual_kind: vgg16     # none | vgg16 | dino
+perceptual_weight: 0.05
+dino_cycle_weight: 0.1
+dino_cycle_metric: cosine  # l2 | cosine
+dino_cycle_train_every: 1
+
+

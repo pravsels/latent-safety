@@ -1,84 +1,118 @@
 import torch
 import numpy as np
+import random
+import bisect
 from torch.utils.data import Dataset, DataLoader
 import h5py
 
 class SplitTrajectoryDataset(Dataset):
-    def __init__(self, hdf5_file, segment_length, split='train', num_test=100):
+    def __init__(self, hdf5_file, segment_length, split='train', num_test=100, seed: int = 0, stride: int = 1):
         """
-        Custom Dataset that can load either the first 1000 trajectories or the rest.
+        HDF5 trajectory dataset that returns fixed-length segments.
         
         Args:
             hdf5_file (str): Path to the HDF5 file containing the trajectories.
             segment_length (int): Length of the segments to sample (H timesteps).
-            split (str): 'train' for the first 1000 trajectories, 'test' for the rest.
-            num_train (int): The number of trajectories to use in the training set.
+            split (str): 'train' or 'test'.
+            num_test (int): Number of trajectories to put into the test split.
+            seed (int): Seed used to shuffle trajectories before splitting (for reproducible splits).
+            stride (int): Step between consecutive segment start indices within a trajectory.
         """
         self.hdf5_file = hdf5_file
-        self.segment_length = segment_length
+        self.segment_length = int(segment_length)
         self.split = split
-        self.num_test = num_test
+        self.num_test = int(num_test)
+        self.seed = int(seed)
+        self.stride = int(stride)
+        if self.segment_length <= 0:
+            raise ValueError(f"segment_length must be > 0. Got {self.segment_length}")
+        if self.stride <= 0:
+            raise ValueError(f"stride must be > 0. Got {self.stride}")
+        self._hf = None  # lazily opened per worker/process
         
         # Open HDF5 file to get a list of trajectory groups
         with h5py.File(self.hdf5_file, 'r') as hf:
-            self.trajectory_ids = list(hf.keys())
+            trajectory_ids = sorted(list(hf.keys()))
         
+        # Shuffle trajectories before splitting (reproducible).
+        rng = random.Random(self.seed)
+        rng.shuffle(trajectory_ids)
 
         # Split the dataset based on the specified split
         if self.split == 'train':
-            self.trajectory_ids = self.trajectory_ids[self.num_test:]
+            self.trajectory_ids = trajectory_ids[self.num_test:]
         elif self.split == 'test':
-            self.trajectory_ids = self.trajectory_ids[:self.num_test]
+            self.trajectory_ids = trajectory_ids[:self.num_test]
         else:
             raise ValueError("split must be 'train' or 'test'.")
         
-        # Precompute trajectory slice indices
-        self.slice_indices = []
+        # Precompute how many valid slices each trajectory contributes (prefix-sum index).
+        self._cum_slices = [0]  # length = num_traj + 1; last element = total slices
         with h5py.File(self.hdf5_file, 'r') as hf:
             for traj_id in self.trajectory_ids:
                 trajectory = hf[traj_id]
-                traj_len = len(trajectory['actions'])
-                for start_idx in range(0, traj_len - self.segment_length + 1, 1):
-                    self.slice_indices.append((traj_id, start_idx))
+                traj_len = int(trajectory['actions'].shape[0])
+                max_start = traj_len - self.segment_length
+                if max_start < 0:
+                    num_slices = 0
+                else:
+                    num_slices = 1 + (max_start // self.stride)
+                self._cum_slices.append(self._cum_slices[-1] + num_slices)
 
+        if self._cum_slices[-1] <= 0:
+            raise ValueError(
+                f"No valid segments found for split='{self.split}' "
+                f"with segment_length={self.segment_length} in {self.hdf5_file}."
+            )
 
     def __len__(self):
-        """Returns the number of trajectories in the selected split."""
-        return len(self.slice_indices)
+        """Returns the number of segments in the selected split."""
+        return int(self._cum_slices[-1])
+
+    def _get_hf(self):
+        if self._hf is None:
+            self._hf = h5py.File(self.hdf5_file, 'r')
+        return self._hf
+
+    def __del__(self):
+        try:
+            if getattr(self, "_hf", None) is not None:
+                self._hf.close()
+        except Exception:
+            pass
 
     def __getitem__(self, idx):
-        """Randomly samples a segment from a randomly selected trajectory."""
+        """Return a segment from the global segment index space."""
+        idx = int(idx)
+        if idx < 0 or idx >= self.__len__():
+            raise IndexError(idx)
 
-        traj_id, start_idx = self.slice_indices[idx]
-        #print(f"Loading trajectory {traj_id} starting at index {start_idx}")
-        with h5py.File(self.hdf5_file, 'r') as hf:
-            trajectory = hf[traj_id]
+        # Find which trajectory this idx falls into.
+        traj_pos = bisect.bisect_right(self._cum_slices, idx) - 1
+        if traj_pos < 0 or traj_pos >= len(self.trajectory_ids):
+            raise IndexError(idx)
+        local_idx = idx - self._cum_slices[traj_pos]
+        start_idx = int(local_idx * self.stride)
+        end_idx = start_idx + self.segment_length
 
-            # Get the trajectory data
-            actions = trajectory['actions'][:]
+        hf = self._get_hf()
+        traj_id = self.trajectory_ids[traj_pos]
+        trajectory = hf[traj_id]
 
-            # Compute end index
-            end_idx = start_idx + self.segment_length
-
-            # Extract the segment of observations, actions, and rewards
-            segment_actions = actions[start_idx:end_idx]
-            
-            segment_obs_tensor = {}
-            
-            segment_obs_tensor["robot0_eye_in_hand_image"] = torch.tensor(np.array(trajectory["camera_0"][start_idx:end_idx]), dtype=torch.uint8)
-            segment_obs_tensor["agentview_image"] = torch.tensor(np.array(trajectory["camera_1"][start_idx:end_idx]), dtype=torch.uint8)
-            segment_obs_tensor["cam_rs_embd"] = torch.tensor(np.array(trajectory["cam_rs_embd"][start_idx:end_idx]), dtype=torch.float32)
-            segment_obs_tensor["cam_zed_embd"] = torch.tensor(np.array(trajectory["cam_zed_embd"][start_idx:end_idx]), dtype=torch.float32)
-            segment_obs_tensor["state"] = torch.tensor(np.array(trajectory["states"][start_idx:end_idx]), dtype=torch.float32)
-            segment_obs_tensor["action"] = torch.tensor(segment_actions, dtype=torch.float32)
-            if "labels" in trajectory.keys():
-                segment_obs_tensor["failure"] = torch.tensor(np.array(trajectory["labels"][start_idx:end_idx]), dtype=torch.float32)
-            segment_obs_tensor["is_first"] = torch.zeros(self.segment_length)
-            segment_obs_tensor["is_last"] = torch.zeros(self.segment_length)
-            segment_obs_tensor["is_first"][0] = 1.
-            segment_obs_tensor["is_terminal"] = segment_obs_tensor["is_last"]
-            segment_obs_tensor["discount"] = torch.ones(self.segment_length, dtype=torch.float32)
-
+        segment_obs_tensor = {}
+        segment_obs_tensor["robot0_eye_in_hand_image"] = torch.tensor(trajectory["camera_0"][start_idx:end_idx], dtype=torch.uint8)
+        segment_obs_tensor["agentview_image"] = torch.tensor(trajectory["camera_1"][start_idx:end_idx], dtype=torch.uint8)
+        segment_obs_tensor["cam_rs_embd"] = torch.tensor(trajectory["cam_rs_embd"][start_idx:end_idx], dtype=torch.float32)
+        segment_obs_tensor["cam_zed_embd"] = torch.tensor(trajectory["cam_zed_embd"][start_idx:end_idx], dtype=torch.float32)
+        segment_obs_tensor["state"] = torch.tensor(trajectory["states"][start_idx:end_idx], dtype=torch.float32)
+        segment_obs_tensor["action"] = torch.tensor(trajectory["actions"][start_idx:end_idx], dtype=torch.float32)
+        if "labels" in trajectory.keys():
+            segment_obs_tensor["failure"] = torch.tensor(trajectory["labels"][start_idx:end_idx], dtype=torch.float32)
+        segment_obs_tensor["is_first"] = torch.zeros(self.segment_length)
+        segment_obs_tensor["is_last"] = torch.zeros(self.segment_length)
+        segment_obs_tensor["is_first"][0] = 1.
+        segment_obs_tensor["is_terminal"] = segment_obs_tensor["is_last"]
+        segment_obs_tensor["discount"] = torch.ones(self.segment_length, dtype=torch.float32)
         return segment_obs_tensor
     
 if __name__ == '__main__':
@@ -88,8 +122,8 @@ if __name__ == '__main__':
     batch_size = 32      # Number of trajectories per batch
 
     # Create the dataset
-    train_dataset = SplitTrajectoryDataset(hdf5_file, segment_length, split='train', num_train=1000)
-    test_dataset = SplitTrajectoryDataset(hdf5_file, segment_length, split='test', num_train=1000)
+    train_dataset = SplitTrajectoryDataset(hdf5_file, segment_length, split='train', num_test=100, seed=0)
+    test_dataset = SplitTrajectoryDataset(hdf5_file, segment_length, split='test', num_test=100, seed=0)
 
 
     # Create the DataLoader
