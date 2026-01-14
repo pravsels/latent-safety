@@ -142,14 +142,12 @@ def _ssim(img1_bchw: torch.Tensor, img2_bchw: torch.Tensor, max_val: float = 1.0
     # Mean over channels and spatial dims, then batch
     return ssim_map.mean(dim=(1, 2, 3)).mean()
 
-def _load_dino_model(device: str):
+def _load_dino_model(device: str, dino_cfg: dict):
     """
-    Load the DINO model used for embeddings (matches dino_wm.config.get_dino_config()).
+    Load the DINO model for the given config (DINOV2_CONFIG or DINOV3_CONFIG).
     Resolved paths are anchored at repo root to avoid cwd sensitivity.
     """
     import warnings
-
-    dino_cfg = get_dino_config()
     hub_repo = dino_cfg["hub_repo"]
     weights_path = dino_cfg.get("weights_path", None)
 
@@ -228,7 +226,7 @@ def _assert_token_shapes_match(
         raise ValueError(
             f"{context}: num_patches mismatch: pred N={predicted_tokens.shape[1]} target N={target_tokens.shape[1]}. "
             f"This usually means your HDF5 embeddings were generated with a different DINO version than "
-            f"`dino_wm/config.py:DINO_VERSION`."
+            f"the DINO version specified in your config/CLI."
         )
     if predicted_tokens.shape[2] != target_tokens.shape[2]:
         raise ValueError(
@@ -688,7 +686,7 @@ def main():
         nonlocal dino_model
         if dino_model is None:
             print("Loading DINO model for perceptual/cycle losses...")
-            dino_model = _load_dino_model(device)
+            dino_model = _load_dino_model(device, dino_cfg)
         return dino_model
 
     def _ensure_vgg_model():

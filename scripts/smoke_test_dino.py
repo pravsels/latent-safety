@@ -23,12 +23,11 @@ def smoke_test_dino(
     from dino_wm import config
     from scripts.utils import get_dino_model
 
-    config.DINO_VERSION = version
-    dino_cfg = config.get_dino_config()
+    dino_cfg = config.get_dino_config(version)
 
     print(f"\n[DINO {version}] Loading {dino_cfg['model_name']}...")
 
-    model = get_dino_model(device)
+    model = get_dino_model(device, version)
 
     img = torch.randn(batch_size, 3, h, w, device=device)
 
@@ -58,16 +57,12 @@ def smoke_test_compare(
     w: int,
 ) -> None:
     """Compare DINOv2 and DINOv3 outputs side by side."""
-    from dino_wm import config
     from scripts.utils import get_dino_model
 
     print("\n[Compare] Loading both models...")
 
-    config.DINO_VERSION = 'v2'
-    v2 = get_dino_model(device)
-
-    config.DINO_VERSION = 'v3'
-    v3 = get_dino_model(device)
+    v2 = get_dino_model(device, 'v2')
+    v3 = get_dino_model(device, 'v3')
 
     img = torch.randn(batch_size, 3, h, w, device=device)
 
@@ -91,29 +86,23 @@ def smoke_test_compare(
 def smoke_test_decoder(device: str) -> None:
     """Test Decoder for both v2 and v3 patch configurations."""
     from dino_wm.dino_models import Decoder
-    from dino_wm import config
 
     print("\n[Decoder] Testing both v2 and v3 configurations...")
 
     # Test v2: 256 patches, 16x16 grid
-    original_version = config.DINO_VERSION
-    config.DINO_VERSION = 'v2'
-    decoder_v2 = Decoder().to(device)
+    decoder_v2 = Decoder(dino_version='v2').to(device)
     x_v2 = torch.randn(2, 256, 384, device=device)
     out_v2 = decoder_v2(x_v2)
     assert out_v2.shape == (2, 3, 224, 224), f"v2 expected (2, 3, 224, 224), got {out_v2.shape}"
     print(f"[Decoder v2] grid_size: {decoder_v2.grid_size}, input: (2, 256, 384), output: {tuple(out_v2.shape)}")
 
     # Test v3: 196 patches, 14x14 grid
-    config.DINO_VERSION = 'v3'
-    decoder_v3 = Decoder().to(device)
+    decoder_v3 = Decoder(dino_version='v3').to(device)
     x_v3 = torch.randn(2, 196, 384, device=device)
     out_v3 = decoder_v3(x_v3)
     assert out_v3.shape == (2, 3, 224, 224), f"v3 expected (2, 3, 224, 224), got {out_v3.shape}"
     print(f"[Decoder v3] grid_size: {decoder_v3.grid_size}, input: (2, 196, 384), output: {tuple(out_v3.shape)}")
 
-    # Restore original version
-    config.DINO_VERSION = original_version
     print("[Decoder] PASSED")
 
 
@@ -124,11 +113,8 @@ def smoke_test_video_transformer(device: str) -> None:
 
     print("\n[VideoTransformer] Testing both v2 and v3 configurations...")
 
-    original_version = config.DINO_VERSION
-
     for version in ['v2', 'v3']:
-        config.DINO_VERSION = version
-        patches = config.get_dino_config()['num_patches']
+        patches = config.get_dino_config(version)['num_patches']
 
         model = VideoTransformer(
             image_size=(224, 224),
@@ -141,7 +127,8 @@ def smoke_test_video_transformer(device: str) -> None:
             heads=16,
             mlp_dim=2048,
             num_frames=4,
-            device=device
+            device=device,
+            dino_version=version,
         ).to(device)
 
         video1 = torch.randn(2, 4, patches, 384, device=device)
@@ -154,7 +141,6 @@ def smoke_test_video_transformer(device: str) -> None:
         assert out.shape == expected, f"{version} expected {expected}, got {out.shape}"
         print(f"[VideoTransformer for DINO{version}] num_patches: {model.num_patches}, output: {tuple(out.shape)}")
 
-    config.DINO_VERSION = original_version
     print("[VideoTransformer] PASSED")
 
 

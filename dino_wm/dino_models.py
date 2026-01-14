@@ -105,7 +105,7 @@ class ResidualBlock2(nn.Module):
         return x + self.block(x)
 
 class Decoder(nn.Module):
-    def __init__(self, in_channels=None, out_channels=3):
+    def __init__(self, in_channels=None, out_channels=3, dino_version: str | None = None):
         super(Decoder, self).__init__()
 
         # Use MODEL_CONFIG['dim'] as default if not specified
@@ -113,7 +113,7 @@ class Decoder(nn.Module):
             in_channels = MODEL_CONFIG['dim']
 
         self.in_channels = in_channels
-        dino_cfg = get_dino_config()
+        dino_cfg = get_dino_config(dino_version)
         self.grid_size = int(dino_cfg['num_patches'] ** 0.5)  # 16 for v2, 14 for v3
         
         # Two residual blocks
@@ -282,12 +282,13 @@ class VideoTransformer(nn.Module):
         dim_head: int = 64,
         dropout: float = 0.,
         emb_dropout: float = 0.,
-        device: str = 'cuda'
+        device: str = 'cuda',
+        dino_version: str | None = None,
     ):
         super().__init__()
-        
+
         self.device = device
-        dino_cfg = get_dino_config()
+        dino_cfg = get_dino_config(dino_version)
         if 'hub_source' in dino_cfg:
             self.dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name'],
                                        source=dino_cfg['hub_source'], weights=dino_cfg['weights_path']).to(device)

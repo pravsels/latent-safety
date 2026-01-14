@@ -30,8 +30,8 @@ lerobot.datasets.lerobot_dataset.hf_transform_to_torch = safe_hf_transform_to_to
 
 # --- Transforms & Model ---
 
-def get_dino_model(device: str):
-    dino_cfg = get_dino_config()
+def get_dino_model(device: str, version: str | None = None):
+    dino_cfg = get_dino_config(version)
     print(f"Loading {dino_cfg['model_name']} on {device}...")
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="xFormers is not available")

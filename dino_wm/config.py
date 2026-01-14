@@ -4,10 +4,8 @@ Global configuration for DINO World Model.
 
 import math
 
-# DINO Version Selection
-DINO_VERSION = 'v2'  # 'v2' or 'v3'
-
 DINOV2_CONFIG = {
+    'version': 'v2',
     'hub_repo': 'facebookresearch/dinov2',
     'model_name': 'dinov2_vits14_reg',
     'dim': 384,
@@ -16,6 +14,7 @@ DINOV2_CONFIG = {
 }
 
 DINOV3_CONFIG = {
+    'version': 'v3',
     'hub_repo': '../dinov3',
     'hub_source': 'local',
     'model_name': 'dinov3_vits16plus',
@@ -25,8 +24,20 @@ DINOV3_CONFIG = {
     'patch_size': 16,
 }
 
-def get_dino_config():
-    return DINOV3_CONFIG if DINO_VERSION == 'v3' else DINOV2_CONFIG
+DINO_CONFIGS = {
+    'v2': DINOV2_CONFIG,
+    'v3': DINOV3_CONFIG,
+}
+
+# Default version (used when get_dino_config() called without argument)
+DEFAULT_DINO_VERSION = 'v3'
+
+def get_dino_config(version: str | None = None):
+    """Get DINO config by version. Falls back to DEFAULT_DINO_VERSION if not specified."""
+    v = version if version is not None else DEFAULT_DINO_VERSION
+    if v not in DINO_CONFIGS:
+        raise ValueError(f"Unknown DINO version: {v}. Must be one of {list(DINO_CONFIGS.keys())}")
+    return DINO_CONFIGS[v]
 
 # Decoder architecture constant: total spatial upsampling factor (stride=4 twice -> 4*4=16)
 DECODER_UPSAMPLE_FACTOR = 16
@@ -48,9 +59,9 @@ def compute_decoder_image_size(dino_cfg: dict) -> tuple[int, int]:
     out = side * DECODER_UPSAMPLE_FACTOR
     return (out, out)
 
-def get_decoder_image_size() -> tuple[int, int]:
-    """Convenience wrapper using the globally selected DINO_VERSION."""
-    return compute_decoder_image_size(get_dino_config())
+def get_decoder_image_size(version: str | None = None) -> tuple[int, int]:
+    """Convenience wrapper using the specified or default DINO version."""
+    return compute_decoder_image_size(get_dino_config(version))
 
 # Model Architecture
 MODEL_CONFIG = {
@@ -66,7 +77,7 @@ MODEL_CONFIG = {
 
 # Decoder-specific configuration
 DECODER_CONFIG = {
-    # Decoder output size (kept consistent with selected DINO_VERSION)
+    # Decoder output size (kept consistent with selected DINO version)
     'decoder_image_size': get_decoder_image_size(),
     'codebook_size': 2048,             # VQ-VAE codebook size (number of embeddings in the discrete vocabulary)
 }

@@ -27,11 +27,9 @@ from tqdm import tqdm
 try:
     from scripts.utils import get_dino_model, preprocess_images_for_dino, to_hwc_uint8
     import scripts.utils
-    import dino_wm.config as dino_config
 except ImportError:
     from utils import get_dino_model, preprocess_images_for_dino, to_hwc_uint8
-    import utils 
-    import dino_wm.config as dino_config
+    import utils
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # Global flag for graceful shutdown
@@ -368,9 +366,7 @@ def main():
                        help="DINO version to use for embeddings (default: v3)")
     args = parser.parse_args()
 
-    # Set DINO version in config
-    print(f"🔧 Using DINO_VERSION: {args.dino_version}")
-    dino_config.DINO_VERSION = args.dino_version
+    print(f"🔧 Using DINO version: {args.dino_version}")
 
     # Setup signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
@@ -379,16 +375,16 @@ def main():
     # Load Dataset List
     with open(args.datasets_list, "r") as f:
         dataset_ids = json.load(f)
-    
+
     if args.max_datasets:
         dataset_ids = dataset_ids[:args.max_datasets]
 
     # Setup Device
     device = args.device if torch.cuda.is_available() else "cpu"
-    
+
     # Load Model
     print("📦 Loading DINO model...")
-    dino_model = get_dino_model(device)
+    dino_model = get_dino_model(device, args.dino_version)
 
     # Prepare Output
     output_path = Path(args.output_hdf5)
