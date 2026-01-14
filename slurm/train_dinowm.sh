@@ -22,6 +22,7 @@ container="${data_dir}/container/latent_safety_arm64.sif"
 HDF5_FILE="${data_dir}/arx5_datasets_new.h5"
 STATS_FILE="${data_dir}/arx5_datasets_new_stats.json"
 CHECKPOINT_DIR="${data_dir}/dino_wm_checkpoints"
+DECODER_CHECKPOINT="${data_dir}/dino_decoder_checkpoints/testing_decoder.pth"
 CONFIG_FILE="configs/wm_config.yaml"
 CONFIG_PATH="${repo_dir}/${CONFIG_FILE}"
 
@@ -40,6 +41,7 @@ TRAIN_CMD="python dino_wm/train_dino_wm.py \
     --hdf5-file ${HDF5_FILE} \
     --dataset-stats ${STATS_FILE} \
     --checkpoint-dir ${CHECKPOINT_DIR} \
+    --decoder-checkpoint ${DECODER_CHECKPOINT} \
     --auto-resume"
 
 echo "Running stats and training..."
