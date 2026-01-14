@@ -20,6 +20,7 @@ eval_samples: 8
 save_every: 1000
 
 # World Model / Decoder
+dino_version: "v3"
 decoder_checkpoint: dino_decoder_checkpoints/testing_decoder.pth
 
 # Resume behavior

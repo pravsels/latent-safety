@@ -39,7 +39,7 @@ if _REPO_ROOT not in sys.path:
 from test_loader import SplitTrajectoryDataset
 from dino_decoder import VQVAE
 from dino_models import VideoTransformer, normalize_acs, normalize_states, unnormalize_states
-from dino_wm.config import MODEL_CONFIG, TRAIN_CONFIG, DECODER_CONFIG
+from dino_wm.config import MODEL_CONFIG, TRAIN_CONFIG, DECODER_CONFIG, get_dino_config, get_decoder_image_size
 
 
 def _global_grad_norm(parameters, norm_type: float = 2.0) -> float:
@@ -154,6 +154,13 @@ def main():
         type=str,
         default="dino_decoder_checkpoints/testing_decoder.pth",
         help="Path to decoder checkpoint (default: dino_decoder_checkpoints/testing_decoder.pth).",
+    )
+    parser.add_argument(
+        "--dino-version",
+        type=str,
+        default="v3",
+        choices=["v2", "v3"],
+        help="DINO version to use (default: v3).",
     )
     parser.add_argument(
         "--sequence-length",
@@ -365,6 +372,14 @@ def main():
     expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
     expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
 
+    # Configure model dimensions and image sizes based on selected DINO version
+    dino_cfg = get_dino_config(args.dino_version)
+    decoder_img_size = get_decoder_image_size(args.dino_version)
+
+    MODEL_CONFIG['dim'] = dino_cfg['dim']
+    MODEL_CONFIG['image_size'] = decoder_img_size
+    DECODER_CONFIG['decoder_image_size'] = decoder_img_size
+
     # Load decoder
     decoder = VQVAE().to(device)
     decoder.load_state_dict(torch.load(args.decoder_checkpoint, map_location=device))
@@ -376,20 +391,12 @@ def main():
         state_dim=state_dim,    # Inferred from dataset stats
         action_dim=action_dim,  # Inferred from dataset stats
         num_frames=BL-1,        # context window size (input sequence length)
+        dino_version=args.dino_version,
         **MODEL_CONFIG
     ).to(device)
-    
-    if args.resume_checkpoint is not None:
-        print(f"Resuming from checkpoint: {args.resume_checkpoint}")
-        ckpt = torch.load(args.resume_checkpoint, map_location=device)
-        # Handle both old (state_dict) and new (dict with model_state_dict) formats
-        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-            transition.load_state_dict(ckpt['model_state_dict'])
-        else:
-            transition.load_state_dict(ckpt)
-    
+
     transition.train()
-    
+
     # Optimizer
     optimizer = AdamW([
         {'params': transition.transformer.parameters(), 'lr': 5e-5},
