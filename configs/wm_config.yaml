@@ -1,0 +1,39 @@
+# Default configuration for training the DINO World Model.
+# Usage:
+#   python dino_wm/train_dino_wm.py --config configs/wm_config.yaml
+
+# Data
+hdf5_file: arx5_datasets_new.h5
+dataset_stats: arx5_datasets_new_stats.json
+test_frac: 0.1
+
+# Training
+batch_size: 64
+train_iters: 100000
+device: "cuda:0"
+seed: 0
+sequence_length: 4
+eval_horizon: 16
+context_length: 3
+eval_interval: 1000
+eval_samples: 8
+save_every: 1000
+
+# World Model / Decoder
+decoder_checkpoint: dino_decoder_checkpoints/testing_decoder.pth
+
+# Resume behavior
+auto_resume: false
+resume_checkpoint: null
+start_iter: 0
+
+# WandB
+wandb_mode: offline
+wandb_project: dino-WM
+wandb_entity: pravsels
+wandb_name: dinov3-wm
+
+# Optimizer / LR scheduling
+lr_schedule: cosine
+lr_min_factor: 0.1
+lr_warmup_iters: 1000

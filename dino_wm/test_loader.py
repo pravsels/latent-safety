@@ -106,6 +106,8 @@ class SplitTrajectoryDataset(Dataset):
         segment_obs_tensor["cam_zed_embd"] = torch.tensor(trajectory["cam_zed_embd"][start_idx:end_idx], dtype=torch.float32)
         segment_obs_tensor["state"] = torch.tensor(trajectory["states"][start_idx:end_idx], dtype=torch.float32)
         segment_obs_tensor["action"] = torch.tensor(trajectory["actions"][start_idx:end_idx], dtype=torch.float32)
+        segment_obs_tensor["traj_id"] = traj_id
+        segment_obs_tensor["start_idx"] = start_idx
         if "labels" in trajectory.keys():
             segment_obs_tensor["failure"] = torch.tensor(trajectory["labels"][start_idx:end_idx], dtype=torch.float32)
         segment_obs_tensor["is_first"] = torch.zeros(self.segment_length)

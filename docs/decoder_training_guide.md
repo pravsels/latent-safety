@@ -45,10 +45,34 @@ If MSE results in blurry outputs, consider incorporating a **perceptual loss** (
 ### Generalization Baseline
 Always compare `train_loss` vs `eval_loss` across different trajectories. A significant gap indicates that the decoder is memorizing background details of specific runs rather than learning a general-purpose mapping from DINO features to pixels.
 
-## 4. Auto-Resume Caveats
+## 5. Evaluating Training Runs
 
-The trainer supports preemption-safe resuming via `--auto-resume`, but keep the following in mind:
-*   **WandB Runs:** A new WandB run is created on each restart (run IDs are not currently persisted).
-*   **Plateau Scheduler:** If using `--lr-schedule plateau`, the internal patience counter and best-loss tracker for the scheduler are reset upon resuming.
-*   **Data Shuffling:** The random seed is reset at startup, meaning the `DataLoader` shuffle sequence restarts from the beginning for the current epoch/iteration.
+Once training is underway, monitor the following trends in WandB to ensure the decoder is developing both pixel-perfect accuracy and semantic consistency.
+
+### Expected Log Trends
+
+1.  **Reconstruction Loss (`train_loss` / `eval_loss`):**
+    *   **Trend:** Should drop very quickly in the first 1-2k iterations.
+    *   **Stage 2 Transition:** Once MSE plateaus, the trainer automatically enables Stage 2 (Perceptual and DINO-cycle losses). You will see a small "bump" in total loss at this transition, followed by a new downward trend as the model refines details.
+    *   **Baseline:** For DINOv3 (224x224), an `eval_loss` below **0.01** is typically required for a stable World Model.
+
+2.  **Structural Metrics (`eval_psnr` / `eval_ssim`):**
+    *   **Trend:** Should rise steadily.
+    *   **Targets:** Aim for `PSNR > 30` and `SSIM > 0.90`.
+    *   **Warning Sign:** If SSIM remains low (< 0.7) while PSNR is high, the model is likely matching the average color (low MSE) but failing to reconstruct the high-frequency edges and textures of the robot arms.
+
+3.  **DINO Cycle Consistency (`eval_dino_cycle_loss`):**
+    *   **Trend:** This metric measures if the pixels "contain" the original DINO features. It should drop significantly during Stage 2.
+    *   **Importance:** A low pixel MSE does *not* guarantee the downstream Transformer can understand the images. Successful DINO-cycle minimization is the best predictor of World Model success.
+
+4.  **Gradient Norm (`grad_norm`):**
+    *   **Trend:** Should stay roughly between **0.1 and 1.0**.
+    *   **Warning Sign:** Large spikes often occur right at the Stage 2 transition. If they don't settle within 500 iterations, reduce the `--perceptual-weight`.
+
+### Visual Inspection (WandB Images)
+
+*   **Diff Maps (`diff_front`, `diff_wrist`):** These highlight exactly what the model is missing.
+    *   **Good:** Uniformly dark or faint noise.
+    *   **Bad:** Bright outlines of the robot arm or objects. This means the model has "memorized" the background but hasn't learned to accurately place the dynamic elements based on the DINO features.
+*   **Edge Sharpness:** Zoom in on the predicted gripper. If it looks like a "ghost" or is highly transparent, the decoder is failing to resolve the exact spatial location from the patch embeddings.
 
