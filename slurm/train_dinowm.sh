@@ -22,6 +22,7 @@ scratch_dir="/scratch/u5dm/pravsels.u5dm"
 repo_dir="${home_dir}/latent_safety"
 data_dir="${scratch_dir}/latent_safety"
 container="${data_dir}/container/latent_safety_arm64.sif"
+PYTHON_EXT_DIR="${data_dir}/python_packages"
 
 # Training config
 HDF5_FILE="${data_dir}/arx5_datasets_new.h5"
@@ -31,7 +32,7 @@ DECODER_CHECKPOINT="${data_dir}/dino_decoder_checkpoints/testing_decoder.pth"
 CONFIG_FILE="configs/wm_config.yaml"
 CONFIG_PATH="${repo_dir}/${CONFIG_FILE}"
 
-mkdir -p "${CHECKPOINT_DIR}"
+mkdir -p "${CHECKPOINT_DIR}" "${PYTHON_EXT_DIR}"
 
 start_time="$(date -Is --utc)"
 echo "===================================="
@@ -54,6 +55,8 @@ TRAIN_CMD="python dino_wm/train_dino_wm.py \
     --decoder-checkpoint ${DECODER_CHECKPOINT} \
     --auto-resume"
 
+INSTALL_TORCHMETRICS_CMD="python -m pip install --upgrade --target ${PYTHON_EXT_DIR} torchmetrics"
+
 echo "Running stats and training..."
 echo "Command: ${STATS_CMD} && ${TRAIN_CMD}"
 echo ""
@@ -64,7 +67,10 @@ apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \
     "${container}" \
-    bash -c "export PYTHONPATH=${repo_dir}:\$PYTHONPATH && ${STATS_CMD} && ${TRAIN_CMD}"
+    bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
+        if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"torchmetrics\") else 1)'; then \
+            ${INSTALL_TORCHMETRICS_CMD}; \
+        fi && ${STATS_CMD} && ${TRAIN_CMD}"
 EXIT_CODE=$?
 set -e
 
