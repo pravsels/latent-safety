@@ -55,7 +55,7 @@ TRAIN_CMD="python dino_wm/train_dino_wm.py \
     --decoder-checkpoint ${DECODER_CHECKPOINT} \
     --auto-resume"
 
-INSTALL_TORCHMETRICS_CMD="python -m pip install --upgrade --target ${PYTHON_EXT_DIR} torchmetrics"
+INSTALL_TORCHMETRICS_CMD="python -m pip install --upgrade --no-deps --target ${PYTHON_EXT_DIR} torchmetrics"
 
 echo "Running stats and training..."
 echo "Command: ${STATS_CMD} && ${TRAIN_CMD}"
