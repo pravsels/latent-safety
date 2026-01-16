@@ -38,7 +38,8 @@ mkdir -p "${CHECKPOINT_DIR}" "${PYTHON_EXT_DIR}"
 if [ -L "${repo_dir}/weights" ] || [ ! -e "${repo_dir}/weights" ]; then
     ln -sfn "${data_dir}/weights" "${repo_dir}/weights"
 elif [ -d "${repo_dir}/weights" ]; then
-    echo "Warning: ${repo_dir}/weights exists and is not a symlink; using it as-is."
+    # If a real dir exists, still link the file so relative path resolves.
+    ln -sfn "${data_dir}/weights/dinov3_vits16plus.pth" "${repo_dir}/weights/dinov3_vits16plus.pth"
 fi
 
 start_time="$(date -Is --utc)"
