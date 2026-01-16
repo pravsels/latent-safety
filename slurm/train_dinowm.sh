@@ -34,6 +34,13 @@ CONFIG_PATH="${repo_dir}/${CONFIG_FILE}"
 
 mkdir -p "${CHECKPOINT_DIR}" "${PYTHON_EXT_DIR}"
 
+# Ensure repo weights path points to scratch weights for relative lookups
+if [ -L "${repo_dir}/weights" ] || [ ! -e "${repo_dir}/weights" ]; then
+    ln -sfn "${data_dir}/weights" "${repo_dir}/weights"
+elif [ -d "${repo_dir}/weights" ]; then
+    echo "Warning: ${repo_dir}/weights exists and is not a symlink; using it as-is."
+fi
+
 start_time="$(date -Is --utc)"
 echo "===================================="
 echo "Job ID: ${SLURM_JOB_ID}"
