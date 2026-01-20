@@ -45,9 +45,11 @@ def _load_decoder_checkpoint(path: str, device: str):
       (state_dict, meta_dict)
     """
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        meta = {k: v for k, v in ckpt.items() if k != "model_state_dict"}
-        return ckpt["model_state_dict"], meta
+    if isinstance(ckpt, dict):
+        for key in ("model_state_dict", "decoder_state_dict", "state_dict"):
+            if key in ckpt:
+                meta = {k: v for k, v in ckpt.items() if k != key}
+                return ckpt[key], meta
     # Otherwise assume it's already a raw state_dict
     return ckpt, {}
 
@@ -69,6 +71,33 @@ def _resolve_quantize_flag(user_quantize, ckpt_meta: dict, checkpoint_path: str)
     if "_vq" in os.path.basename(checkpoint_path):
         return True
     return False
+
+
+def _infer_dino_version_from_meta(ckpt_meta: dict | None) -> str | None:
+    """
+    Infer DINO version from checkpoint metadata.
+    Priority:
+      1) explicit 'dino_version'
+      2) decoder_image_size (256 -> v2, 224 -> v3)
+    """
+    if not isinstance(ckpt_meta, dict):
+        return None
+    if "dino_version" in ckpt_meta and ckpt_meta["dino_version"]:
+        return str(ckpt_meta["dino_version"])
+    if "decoder_image_size" in ckpt_meta and ckpt_meta["decoder_image_size"]:
+        size = ckpt_meta["decoder_image_size"]
+        if isinstance(size, (list, tuple)) and len(size) > 0:
+            side = int(size[0])
+        else:
+            try:
+                side = int(size)
+            except (TypeError, ValueError):
+                return None
+        if side >= 256:
+            return "v2"
+        if side == 224:
+            return "v3"
+    return None
 
 
 def extract_dino_features(images, dino_model, device, is_front_camera=False):
@@ -226,7 +255,10 @@ def main():
     
     # Load DINO model
     print("Loading DINO model...")
-    dino_model = get_dino_model(device)
+    dino_version = _infer_dino_version_from_meta(ckpt_meta)
+    if dino_version:
+        print(f"Using DINO version from checkpoint metadata: {dino_version}")
+    dino_model = get_dino_model(device, version=dino_version)
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
