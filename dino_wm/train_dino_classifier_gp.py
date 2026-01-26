@@ -33,7 +33,13 @@ from tqdm import tqdm
 from dino_decoder import VQVAE
 from test_loader import SplitTrajectoryDataset
 from dino_models import VideoTransformer, normalize_acs, normalize_states
-from dino_wm.config import MODEL_CONFIG, TRAIN_CONFIG
+from dino_wm.config import (
+    MODEL_CONFIG,
+    TRAIN_CONFIG,
+    DECODER_CONFIG,
+    get_dino_config,
+    get_decoder_image_size,
+)
 
 
 def fail_loss(pred, fail_data):
@@ -166,6 +172,23 @@ def fail_loss_gp(transition, feat, fail_data, gp_weight=10.0, relu_weight=100.0,
     return lx_loss
 
 
+def _compute_confusion(pred_scores, labels, threshold: float = 0.0):
+    pred_pos = pred_scores > threshold
+    gt_pos = labels > 0
+    tp = torch.sum(pred_pos & gt_pos).float()
+    fn = torch.sum((~pred_pos) & gt_pos).float()
+    fp = torch.sum(pred_pos & (~gt_pos)).float()
+    tn = torch.sum((~pred_pos) & (~gt_pos)).float()
+    return tp, fn, fp, tn
+
+
+def _precision_recall_f1(tp, fn, fp):
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+    f1 = 2.0 * precision * recall / (precision + recall + 1e-8)
+    return precision, recall, f1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Train failure classifier with gradient penalty on top of frozen DINO World Model"
@@ -223,20 +246,27 @@ def main():
     parser.add_argument(
         "--decoder-checkpoint",
         type=str,
-        default="dino_decoder_checkpoints/testing_decoder.pth",
-        help="Path to decoder checkpoint (default: dino_decoder_checkpoints/testing_decoder.pth).",
+        default=None,
+        help="Path to decoder checkpoint (defaults to a DINO-version-specific path).",
     )
     parser.add_argument(
         "--wm-checkpoint",
         type=str,
-        default="dino_wm_checkpoints/best_wm.pth",
-        help="Path to world model checkpoint to load (default: dino_wm_checkpoints/best_wm.pth).",
+        default=None,
+        help="Path to world model checkpoint to load (defaults to a DINO-version-specific path).",
     )
     parser.add_argument(
         "--checkpoint-dir",
         type=str,
-        default="dino_wm_checkpoints",
-        help="Directory to save checkpoints (default: dino_wm_checkpoints).",
+        default=None,
+        help="Directory to save checkpoints (defaults to a DINO-version-specific path).",
+    )
+    parser.add_argument(
+        "--dino-version",
+        type=str,
+        default="v3",
+        choices=["v2", "v3"],
+        help="DINO version used to generate embeddings (default: v3).",
     )
     parser.add_argument(
         "--dataset-stats",
@@ -325,6 +355,25 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.decoder_checkpoint is None:
+        args.decoder_checkpoint = (
+            "dino3_decoder_checkpoints/best_decoder.pth"
+            if args.dino_version == "v3"
+            else "dino2_decoder_checkpoints/testing_decoder.pth"
+        )
+    if args.wm_checkpoint is None:
+        args.wm_checkpoint = (
+            "dino3_wm_checkpoints/best_wm.pth"
+            if args.dino_version == "v3"
+            else "dino2_wm_checkpoints/best_wm.pth"
+        )
+    if args.checkpoint_dir is None:
+        args.checkpoint_dir = (
+            "dino3_wm_checkpoints"
+            if args.dino_version == "v3"
+            else "dino2_wm_checkpoints"
+        )
+
     # Initialize wandb
     wandb.init(
         project=args.wandb_project,
@@ -406,6 +455,13 @@ def main():
     expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
     expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
    
+    # Configure model dimensions and image sizes based on selected DINO version
+    dino_cfg = get_dino_config(args.dino_version)
+    decoder_img_size = get_decoder_image_size(args.dino_version)
+    MODEL_CONFIG['dim'] = dino_cfg['dim']
+    MODEL_CONFIG['image_size'] = decoder_img_size
+    DECODER_CONFIG['decoder_image_size'] = decoder_img_size
+
     # Load decoder
     decoder = VQVAE().to(device)
     decoder.load_state_dict(torch.load(args.decoder_checkpoint, map_location=device))
@@ -417,17 +473,18 @@ def main():
         state_dim=state_dim,
         action_dim=action_dim,
         num_frames=BL-1,
+        dino_version=args.dino_version,
         **MODEL_CONFIG
     ).to(device)
     
     if args.resume_checkpoint is not None:
         print(f"Resuming from checkpoint: {args.resume_checkpoint}")
         ckpt = torch.load(args.resume_checkpoint, map_location=device)
-        # Handle both old (state_dict) and new (dict with model_state_dict) formats
-        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-            transition.load_state_dict(ckpt['model_state_dict'])
+        # Resume only the failure head (world model remains frozen).
+        if isinstance(ckpt, dict) and 'failure_head_state_dict' in ckpt:
+            transition.failure_head.load_state_dict(ckpt['failure_head_state_dict'])
         else:
-            transition.load_state_dict(ckpt)
+            transition.failure_head.load_state_dict(ckpt)
     else:
         print(f"Loading world model from {args.wm_checkpoint}")
         transition.load_state_dict(torch.load(args.wm_checkpoint, map_location=device))
@@ -446,9 +503,12 @@ def main():
     best_ckpt_path = os.path.join(args.checkpoint_dir, 'best_classifier_gp.pth')
     if os.path.exists(best_ckpt_path):
         best_ckpt = torch.load(best_ckpt_path, map_location=device)
-        if isinstance(best_ckpt, dict) and 'best_eval' in best_ckpt:
-            best_eval = best_ckpt['best_eval']
-            print(f"Loaded previous best eval: {best_eval:.4f}")
+        if isinstance(best_ckpt, dict):
+            if 'failure_head_state_dict' in best_ckpt:
+                transition.failure_head.load_state_dict(best_ckpt['failure_head_state_dict'])
+            if 'best_eval' in best_ckpt:
+                best_eval = best_ckpt['best_eval']
+                print(f"Loaded previous best eval: {best_eval:.4f}")
     
     train_iter = args.train_iters
     start_iter = args.start_iter
@@ -512,8 +572,17 @@ def main():
                 acs = normalize_acs(acs, action_min, action_max)
                 eval_states = eval_data['state'][[0],:H].to(device)
                 states = normalize_states(eval_states, state_min, state_max)
-                im1s = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.
-                im2s = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
+                decoder_h, decoder_w = DECODER_CONFIG['decoder_image_size']
+                im1s_raw = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.
+                im2s_raw = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
+                im1s = torch.nn.functional.interpolate(
+                    im1s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w),
+                    mode='bilinear', align_corners=False
+                ).permute(0,2,3,1)
+                im2s = torch.nn.functional.interpolate(
+                    im2s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w),
+                    mode='bilinear', align_corners=False
+                ).permute(0,2,3,1)
                 for k in range(EVAL_H-H):
                     pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs)
                     pred_latent = torch.cat([pred1[:,[-1]], pred2[:,[-1]]], dim=0)
@@ -539,8 +608,16 @@ def main():
                     inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
                     states = torch.cat([states[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
                 
-                gt_im1 = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device)
-                gt_im2 = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device)
+                gt_im1_raw = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device)
+                gt_im2_raw = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device)
+                gt_im1 = torch.nn.functional.interpolate(
+                    gt_im1_raw.permute(0,3,1,2), size=(decoder_h, decoder_w),
+                    mode='bilinear', align_corners=False
+                ).permute(0,2,3,1)
+                gt_im2 = torch.nn.functional.interpolate(
+                    gt_im2_raw.permute(0,3,1,2), size=(decoder_h, decoder_w),
+                    mode='bilinear', align_corners=False
+                ).permute(0,2,3,1)
                 gt_fail = eval_data['failure'][[0], :EVAL_H].squeeze().to(device)
                 
                 for j in range(EVAL_H):
@@ -584,19 +661,48 @@ def main():
             print(f"\rIter {i}, Eval Loss: {loss.item():.4f},")
 
             os.makedirs(args.checkpoint_dir, exist_ok=True)
-            torch.save(transition.state_dict(), os.path.join(args.checkpoint_dir, 'classifier_gp.pth'))
+            torch.save(
+                transition.failure_head.state_dict(),
+                os.path.join(args.checkpoint_dir, 'classifier_gp.pth')
+            )
 
             if loss < best_eval:
                 best_eval = loss
                 print(f"New best at iter {i}, saving model.")
                 torch.save({
-                    'model_state_dict': transition.state_dict(),
+                    'failure_head_state_dict': transition.failure_head.state_dict(),
                     'best_eval': best_eval.item() if hasattr(best_eval, 'item') else best_eval
                 }, os.path.join(args.checkpoint_dir, 'best_classifier_gp.pth'))
 
             
             transition.train()
-            wandb.log({'eval_loss': loss.item()})
+            # --- eval metrics ---
+            with torch.no_grad():
+                eval_scores = pred_fail.detach().reshape(-1)
+                eval_labels = eval_data['failure'][:, 1:].to(device).detach().reshape(-1)
+                tp, fn, fp, tn = _compute_confusion(eval_scores, eval_labels, threshold=0.0)
+                precision, recall, f1 = _precision_recall_f1(tp, fn, fp)
+
+                thresholds = [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0]
+                sweep = {}
+                for thr in thresholds:
+                    ttp, tfn, tfp, _ = _compute_confusion(eval_scores, eval_labels, threshold=thr)
+                    p, r, f = _precision_recall_f1(ttp, tfn, tfp)
+                    sweep[f"eval/precision@{thr}"] = p.item()
+                    sweep[f"eval/recall@{thr}"] = r.item()
+                    sweep[f"eval/f1@{thr}"] = f.item()
+
+            wandb.log({
+                'eval_loss': loss.item(),
+                'eval/tp': tp.item(),
+                'eval/fn': fn.item(),
+                'eval/fp': fp.item(),
+                'eval/tn': tn.item(),
+                'eval/precision': precision.item(),
+                'eval/recall': recall.item(),
+                'eval/f1': f1.item(),
+                **sweep,
+            })
 
     best_eval_val = best_eval.item() if hasattr(best_eval, 'item') else best_eval
     print(f"\nTraining complete. Best eval loss: {best_eval_val:.4f}")

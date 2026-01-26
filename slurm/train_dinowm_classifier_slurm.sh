@@ -24,11 +24,11 @@ data_dir="${scratch_dir}/latent_safety"
 container="${data_dir}/container/latent_safety_arm64.sif"
 
 # Training config (weights and checkpoints on scratch due to limited home storage)
-HDF5_FILE="${data_dir}/cubes_push_labeled_combined.h5"
-DATASET_STATS="${data_dir}/cubes_push_labeled_dataset_stats.json"
-DECODER_CHECKPOINT="${data_dir}/dino_decoder_checkpoints/testing_decoder.pth"
-WM_CHECKPOINT="${data_dir}/dino_wm_checkpoints/best_wm.pth"
-CHECKPOINT_DIR="${data_dir}/dino_classifier_checkpoints"
+HDF5_FILE="${data_dir}/cubes_push_labeled_combined_v3.h5"
+DATASET_STATS="${data_dir}/cubes_push_labeled_combined_v3_stats.json"
+DECODER_CHECKPOINT="${data_dir}/dino3_decoder_checkpoints/best_decoder.pth"
+WM_CHECKPOINT="${data_dir}/dino3_wm_checkpoints/best_wm.pth"
+CHECKPOINT_DIR="${data_dir}/dino3_classifier_checkpoints"
 BATCH_SIZE=256
 SEQUENCE_LENGTH=4
 WANDB_PROJECT="latent-safety"
@@ -46,6 +46,7 @@ echo "===================================="
 TRAIN_CMD="python dino_wm/train_dino_classifier.py \
     --hdf5-file ${HDF5_FILE} \
     --dataset-stats ${DATASET_STATS} \
+    --dino-version v3 \
     --decoder-checkpoint ${DECODER_CHECKPOINT} \
     --wm-checkpoint ${WM_CHECKPOINT} \
     --batch-size ${BATCH_SIZE} \

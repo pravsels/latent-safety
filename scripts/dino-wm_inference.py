@@ -25,6 +25,7 @@ from einops import rearrange
 import imageio.v3 as iio
 from tqdm import tqdm
 import h5py
+import matplotlib.pyplot as plt
 
 # Add parent directory to path to import dino_wm modules
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -32,8 +33,37 @@ sys.path.insert(0, parent_dir)
 
 from dino_wm.test_loader import SplitTrajectoryDataset
 from dino_wm.dino_decoder import VQVAE
-from dino_wm.dino_models import VideoTransformer, normalize_acs, normalize_states
+from dino_wm.dino_models import VideoTransformer, normalize_acs, normalize_states, unnormalize_states
 from dino_wm.config import MODEL_CONFIG
+
+
+def _load_state_dict_with_meta(path: str, device: str):
+    """
+    Load checkpoint and return (state_dict, meta_dict).
+    Supports raw state_dict or dict checkpoints with common keys.
+    """
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    if isinstance(ckpt, dict):
+        for key in ("model_state_dict", "decoder_state_dict", "state_dict"):
+            if key in ckpt:
+                meta = {k: v for k, v in ckpt.items() if k != key}
+                return ckpt[key], meta
+    return ckpt, {}
+
+
+def _resolve_quantize_flag(ckpt_meta: dict, checkpoint_path: str) -> bool:
+    """
+    Decide whether to enable VQ codebook quantization.
+    Priority:
+      1) checkpoint metadata key "quantize"
+      2) filename heuristic: "_vq" in basename
+      3) default False
+    """
+    if isinstance(ckpt_meta, dict) and "quantize" in ckpt_meta:
+        return bool(ckpt_meta["quantize"])
+    if "_vq" in os.path.basename(checkpoint_path):
+        return True
+    return False
 
 
 def generate_rollout(transition, decoder, data, context_length, horizon, device, stats, reset_interval=None):
@@ -67,8 +97,8 @@ def generate_rollout(transition, decoder, data, context_length, horizon, device,
     all_data2 = data['cam_rs_embd'][[0]].to(device)
     
     # Normalize states and actions
-    all_states = data['state'][[0]].to(device)
-    all_states = normalize_states(all_states, state_min, state_max)
+    all_states_raw = data['state'][[0]].to(device)
+    all_states = normalize_states(all_states_raw, state_min, state_max)
     
     all_acs = data['action'][[0]].to(device)
     all_acs = normalize_acs(all_acs, action_min, action_max)
@@ -85,6 +115,9 @@ def generate_rollout(transition, decoder, data, context_length, horizon, device,
     im1s = F.interpolate(im1s.permute(0, 3, 1, 2), size=MODEL_CONFIG['image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
     im2s = F.interpolate(im2s.permute(0, 3, 1, 2), size=MODEL_CONFIG['image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
     
+    # Track predicted states (for plotting)
+    pred_states = [all_states_raw[0, :H]]
+
     # Autoregressive rollout
     for k in range(horizon):
         current_idx = H + k
@@ -135,6 +168,8 @@ def generate_rollout(transition, decoder, data, context_length, horizon, device,
         inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
         # pred_state is already normalized (model output), so we can use it directly
         inputs_states = torch.cat([inputs_states[[0], 1:], pred_state[:, -1].unsqueeze(1)], dim=1)
+        pred_state_raw = unnormalize_states(pred_state[:, -1], state_min, state_max)
+        pred_states.append(pred_state_raw.squeeze(0).unsqueeze(0))
     
     # Get ground truth for comparison
     total_length = H + horizon
@@ -145,7 +180,9 @@ def generate_rollout(transition, decoder, data, context_length, horizon, device,
     gt_im1 = gt_im1.squeeze(0) / 255.  # (T, H, W, C)
     gt_im2 = gt_im2.squeeze(0) / 255.
     
-    return gt_im1, gt_im2, im1s, im2s
+    gt_states = all_states_raw[:, :total_length].squeeze(0)
+    pred_states = torch.cat(pred_states, dim=0)[:total_length]
+    return gt_im1, gt_im2, im1s, im2s, gt_states, pred_states
 
 
 def create_comparison_video(gt_im1, gt_im2, pred_im1, pred_im2):
@@ -186,6 +223,44 @@ def create_comparison_video(gt_im1, gt_im2, pred_im1, pred_im2):
     video = np.concatenate([gt_top, separator, pred_bottom], axis=1)  # (T, 2H+16, 2W, C)
     
     return video
+
+
+def plot_state_rollout(gt_states: torch.Tensor, pred_states: torch.Tensor, output_path: str):
+    """
+    Plot per-dimension state rollouts and an L2 error curve.
+    gt_states/pred_states: (T, D) tensors on any device.
+    """
+    gt = gt_states.detach().cpu().numpy()
+    pred = pred_states.detach().cpu().numpy()
+    T, D = gt.shape
+    err = np.linalg.norm(gt - pred, axis=1)
+
+    num_plots = D + 1
+    ncols = 3
+    nrows = int(np.ceil(num_plots / ncols))
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(4 * ncols, 2.8 * nrows), squeeze=False)
+    axes = axes.flatten()
+
+    t = np.arange(T)
+    for i in range(D):
+        ax = axes[i]
+        ax.plot(t, gt[:, i], label="gt", linewidth=1.2)
+        ax.plot(t, pred[:, i], label="pred", linewidth=1.2, alpha=0.8)
+        ax.set_title(f"state[{i}]")
+        ax.grid(True, alpha=0.3)
+
+    ax = axes[D]
+    ax.plot(t, err, color="tab:red", linewidth=1.2)
+    ax.set_title("L2 error")
+    ax.grid(True, alpha=0.3)
+
+    for j in range(D + 1, len(axes)):
+        axes[j].axis("off")
+
+    axes[0].legend(loc="upper right", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 
 def main():
@@ -252,12 +327,14 @@ def main():
     
     # Load models
     print("Loading models...")
-    decoder = VQVAE(quantize=args.quantize).to(device)
-    if args.quantize:
+    dec_state, dec_meta = _load_state_dict_with_meta(args.decoder_checkpoint, device)
+    quantize = bool(args.quantize) if args.quantize else _resolve_quantize_flag(dec_meta, args.decoder_checkpoint)
+    decoder = VQVAE(quantize=quantize).to(device)
+    if quantize:
         print("VQ codebook quantization enabled")
     else:
         print("VQ codebook quantization disabled (standard autoencoder)")
-    decoder.load_state_dict(torch.load(args.decoder_checkpoint, map_location=device, weights_only=False))
+    decoder.load_state_dict(dec_state)
     decoder.eval()
     
     transition = VideoTransformer(
@@ -266,7 +343,8 @@ def main():
         num_frames=args.sequence_length - 1,  # Must match training: sequence_length - 1
         **MODEL_CONFIG
     ).to(device)
-    transition.load_state_dict(torch.load(args.wm_checkpoint, map_location=device, weights_only=False))
+    wm_state, _ = _load_state_dict_with_meta(args.wm_checkpoint, device)
+    transition.load_state_dict(wm_state)
     transition.eval()
     
     # Setup dataset
@@ -326,7 +404,7 @@ def main():
                 data = next(dataloader_iter)
         
         with torch.no_grad():
-            gt_im1, gt_im2, pred_im1, pred_im2 = generate_rollout(
+            gt_im1, gt_im2, pred_im1, pred_im2, gt_states, pred_states = generate_rollout(
                 transition, decoder, data, args.context_length, args.horizon, device, stats, args.reset_interval
             )
             
@@ -337,6 +415,11 @@ def main():
             # imageio expects (T, H, W, C) format
             iio.imwrite(output_path, video, fps=args.fps, codec='libx264', pixelformat='yuv420p')
             print(f"Saved: {output_path}")
+
+            # Save state rollout plot
+            state_plot_path = os.path.join(args.output_dir, f"state_rollout_{i:03d}.png")
+            plot_state_rollout(gt_states, pred_states, state_plot_path)
+            print(f"Saved: {state_plot_path}")
     
     print(f"Done! Videos saved to {args.output_dir}")
 
