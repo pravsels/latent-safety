@@ -19,13 +19,14 @@ data_dir="${scratch_dir}/latent_safety"
 container="${data_dir}/container/latent_safety_arm64.sif"
 HF_CACHE="${scratch_dir}/huggingface_cache"
 SCRATCH_WEIGHTS="${data_dir}/weights"
+PYTHON_EXT_DIR="${data_dir}/python_packages"
 
 # Input/Output config
 INPUT_HDF5="${data_dir}/cubes_push_labeled_combined.h5"
 OUTPUT_HDF5="${data_dir}/cubes_push_labeled_combined_v3.h5"
 BATCH_SIZE=256
 
-mkdir -p "${data_dir}" "${HF_CACHE}"
+mkdir -p "${data_dir}" "${HF_CACHE}" "${PYTHON_EXT_DIR}"
 
 start_time="$(date -Is --utc)"
 
@@ -39,6 +40,8 @@ GEN_CMD="python scripts/add_dino_embeds_to_hdf5.py \
 
 echo "Running command: ${GEN_CMD}"
 
+INSTALL_LEROBOT_CMD="python -m pip install --upgrade --no-deps --target ${PYTHON_EXT_DIR} lerobot"
+
 srun --ntasks=1 --gpus-per-task=1 --cpu-bind=cores \
 apptainer exec --nv \
     --pwd "${repo_dir}" \
@@ -48,7 +51,10 @@ apptainer exec --nv \
     --bind "${SCRATCH_WEIGHTS}:${repo_dir}/weights" \
     --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
-    bash -c "export PYTHONPATH=${repo_dir}:\$PYTHONPATH && ${GEN_CMD}"
+    bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
+        if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"lerobot\") else 1)'; then \
+            ${INSTALL_LEROBOT_CMD}; \
+        fi && ${GEN_CMD}"
 
 end_time="$(date -Is --utc)"
 echo
