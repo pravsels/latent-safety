@@ -40,7 +40,8 @@ GEN_CMD="python scripts/add_dino_embeds_to_hdf5.py \
 
 echo "Running command: ${GEN_CMD}"
 
-INSTALL_DEPS_CMD="python -m pip install --upgrade --target ${PYTHON_EXT_DIR} lerobot datasets"
+INSTALL_DEPS_CMD="python -m pip install --upgrade --no-deps --target ${PYTHON_EXT_DIR} lerobot datasets"
+PURGE_CPU_PKGS_CMD="rm -rf ${PYTHON_EXT_DIR}/torch* ${PYTHON_EXT_DIR}/torchvision* ${PYTHON_EXT_DIR}/torchaudio* ${PYTHON_EXT_DIR}/numpy*"
 
 srun --ntasks=1 --gpus-per-task=1 --cpu-bind=cores \
 apptainer exec --nv \
@@ -52,7 +53,9 @@ apptainer exec --nv \
     --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
     bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
+        export OMP_NUM_THREADS=16 OPENBLAS_NUM_THREADS=16 MKL_NUM_THREADS=16 NUMEXPR_NUM_THREADS=16 && \
         if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"lerobot\") and importlib.util.find_spec(\"datasets\") else 1)'; then \
+            ${PURGE_CPU_PKGS_CMD}; \
             ${INSTALL_DEPS_CMD}; \
         fi && ${GEN_CMD}"
 
