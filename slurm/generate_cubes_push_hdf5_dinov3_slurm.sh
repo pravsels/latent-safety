@@ -19,13 +19,14 @@ data_dir="${scratch_dir}/latent_safety"
 container="${data_dir}/container/latent_safety_arm64.sif"
 HF_CACHE="${scratch_dir}/huggingface_cache"
 SCRATCH_WEIGHTS="${data_dir}/weights"
+PYTHON_EXT_DIR="${data_dir}/python_packages"
 
 # Input/Output config
 INPUT_HDF5="${data_dir}/cubes_push_labeled_combined.h5"
 OUTPUT_HDF5="${data_dir}/cubes_push_labeled_combined_v3.h5"
 BATCH_SIZE=256
 
-mkdir -p "${data_dir}" "${HF_CACHE}"
+mkdir -p "${data_dir}" "${HF_CACHE}" "${PYTHON_EXT_DIR}"
 
 start_time="$(date -Is --utc)"
 
@@ -48,7 +49,7 @@ apptainer exec --nv \
     --bind "${SCRATCH_WEIGHTS}:${repo_dir}/weights" \
     --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
-    bash -c "export PYTHONPATH=${repo_dir}:\$PYTHONPATH && \
+    bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
         export OMP_NUM_THREADS=16 OPENBLAS_NUM_THREADS=16 MKL_NUM_THREADS=16 NUMEXPR_NUM_THREADS=16 && \
         ${GEN_CMD}"
 
