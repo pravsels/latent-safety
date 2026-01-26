@@ -13,9 +13,9 @@ from typing import Iterable
 import h5py
 import numpy as np
 import torch
+from torchvision import transforms
 from tqdm import tqdm
 
-from scripts.utils import get_dino_model, preprocess_images_for_dino
 from dino_wm.config import MODEL_CONFIG, get_dino_config
 
 
@@ -63,6 +63,38 @@ def _ensure_dino_config(version: str):
     return dino_cfg
 
 
+def _get_dino_model(device: str, version: str):
+    dino_cfg = get_dino_config(version)
+    if 'hub_source' in dino_cfg:
+        model = torch.hub.load(
+            dino_cfg['hub_repo'],
+            dino_cfg['model_name'],
+            source=dino_cfg['hub_source'],
+            weights=dino_cfg['weights_path'],
+        ).to(device)
+    else:
+        model = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name']).to(device)
+    model.eval()
+    return model
+
+
+def _preprocess_images_for_dino(images: torch.Tensor, is_front_camera: bool) -> torch.Tensor:
+    """
+    Input: [B, 3, H, W] float32 tensor (0-1)
+    Output: normalized tensor resized to MODEL_CONFIG['image_size']
+    """
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
+
+    out = images
+    if is_front_camera:
+        out = transforms.functional.gaussian_blur(out, kernel_size=(5, 5), sigma=(0.1, 0.1))
+        out = transforms.functional.crop(out, top=30, left=46, height=180, width=180)
+    out = transforms.functional.resize(out, MODEL_CONFIG['image_size'], antialias=True)
+    out = transforms.functional.normalize(out, mean=mean, std=std)
+    return out
+
+
 def _compute_embeddings(
     dino_model,
     cam0: np.ndarray,
@@ -80,8 +112,8 @@ def _compute_embeddings(
         w = w.permute(0, 3, 1, 2).to(device)
         f = f.permute(0, 3, 1, 2).to(device)
 
-        w_prep = preprocess_images_for_dino(w, is_front_camera=False)
-        f_prep = preprocess_images_for_dino(f, is_front_camera=True)
+        w_prep = _preprocess_images_for_dino(w, is_front_camera=False)
+        f_prep = _preprocess_images_for_dino(f, is_front_camera=True)
 
         with torch.no_grad():
             w_emb = dino_model.forward_features(w_prep)["x_norm_patchtokens"].cpu().numpy()
@@ -108,7 +140,7 @@ def main():
     dim = int(dino_cfg["dim"])
 
     device = args.device if torch.cuda.is_available() else "cpu"
-    dino_model = get_dino_model(device, args.dino_version)
+    dino_model = _get_dino_model(device, args.dino_version)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output_hdf5)), exist_ok=True)
 
@@ -118,7 +150,18 @@ def main():
             f"Output HDF5 exists: {args.output_hdf5}. Use --resume or delete it."
         )
 
-    with h5py.File(args.input_hdf5, "r") as hf_in, h5py.File(args.output_hdf5, out_mode) as hf_out:
+    try:
+        hf_out = h5py.File(args.output_hdf5, out_mode)
+    except OSError as e:
+        if args.resume and os.path.exists(args.output_hdf5):
+            backup = f"{args.output_hdf5}.corrupt"
+            os.rename(args.output_hdf5, backup)
+            print(f"⚠️ Output HDF5 was unreadable. Moved to {backup} and starting fresh.")
+            hf_out = h5py.File(args.output_hdf5, "w")
+        else:
+            raise e
+
+    with h5py.File(args.input_hdf5, "r") as hf_in, hf_out:
         in_keys = _iter_trajectory_keys(hf_in)
         out_keys = set(hf_out.keys())
 
