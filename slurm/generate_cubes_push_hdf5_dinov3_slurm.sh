@@ -40,7 +40,7 @@ GEN_CMD="python scripts/add_dino_embeds_to_hdf5.py \
 
 echo "Running command: ${GEN_CMD}"
 
-INSTALL_LEROBOT_CMD="python -m pip install --upgrade --no-deps --target ${PYTHON_EXT_DIR} lerobot"
+INSTALL_DEPS_CMD="python -m pip install --upgrade --target ${PYTHON_EXT_DIR} lerobot datasets"
 
 srun --ntasks=1 --gpus-per-task=1 --cpu-bind=cores \
 apptainer exec --nv \
@@ -52,8 +52,8 @@ apptainer exec --nv \
     --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
     bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
-        if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"lerobot\") else 1)'; then \
-            ${INSTALL_LEROBOT_CMD}; \
+        if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"lerobot\") and importlib.util.find_spec(\"datasets\") else 1)'; then \
+            ${INSTALL_DEPS_CMD}; \
         fi && ${GEN_CMD}"
 
 end_time="$(date -Is --utc)"
