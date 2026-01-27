@@ -464,7 +464,11 @@ def main():
 
     # Load decoder
     decoder = VQVAE().to(device)
-    decoder.load_state_dict(torch.load(args.decoder_checkpoint, map_location=device))
+    decoder_ckpt = torch.load(args.decoder_checkpoint, map_location=device)
+    if isinstance(decoder_ckpt, dict) and 'model_state_dict' in decoder_ckpt:
+        decoder.load_state_dict(decoder_ckpt['model_state_dict'])
+    else:
+        decoder.load_state_dict(decoder_ckpt)
     decoder.eval()
     print(f"Loaded decoder from {args.decoder_checkpoint}")
 
