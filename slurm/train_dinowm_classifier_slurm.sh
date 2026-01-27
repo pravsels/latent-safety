@@ -22,6 +22,7 @@ scratch_dir="/scratch/u5dm/pravsels.u5dm"
 repo_dir="${home_dir}/latent_safety"
 data_dir="${scratch_dir}/latent_safety"
 container="${data_dir}/container/latent_safety_arm64.sif"
+PYTHON_EXT_DIR="${data_dir}/python_packages"
 
 # Training config (weights and checkpoints on scratch due to limited home storage)
 HDF5_FILE="${data_dir}/cubes_push_labeled_combined_v3.h5"
@@ -34,7 +35,7 @@ SEQUENCE_LENGTH=4
 WANDB_PROJECT="latent-safety"
 WANDB_NAME="cubes_push_classifier"
 
-mkdir -p "${CHECKPOINT_DIR}" "${repo_dir}/logs"
+mkdir -p "${CHECKPOINT_DIR}" "${repo_dir}/logs" "${PYTHON_EXT_DIR}"
 
 start_time="$(date -Is --utc)"
 echo "===================================="
@@ -65,7 +66,7 @@ apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \
     "${container}" \
-    bash -c "export PYTHONPATH=${repo_dir}:\$PYTHONPATH && ${TRAIN_CMD}"
+    bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && ${TRAIN_CMD}"
 EXIT_CODE=$?
 set -e
 
