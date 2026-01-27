@@ -491,7 +491,11 @@ def main():
             transition.failure_head.load_state_dict(ckpt)
     else:
         print(f"Loading world model from {args.wm_checkpoint}")
-        transition.load_state_dict(torch.load(args.wm_checkpoint, map_location=device))
+        wm_ckpt = torch.load(args.wm_checkpoint, map_location=device)
+        if isinstance(wm_ckpt, dict) and 'model_state_dict' in wm_ckpt:
+            transition.load_state_dict(wm_ckpt['model_state_dict'])
+        else:
+            transition.load_state_dict(wm_ckpt)
 
     # Freeze all parameters except failure head
     for name, param in transition.named_parameters():
