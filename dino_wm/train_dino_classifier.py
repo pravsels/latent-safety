@@ -2,11 +2,20 @@
 """
 Train the failure classifier head on top of a frozen DINO World Model.
 
-Quickstart:
+Quickstart (training from scratch):
 
   python dino_wm/train_dino_classifier.py --hdf5-file /data/labeled/train.h5
 
-Resume training:
+Auto-resume (will automatically continue from last checkpoint if it exists):
+
+  python dino_wm/train_dino_classifier.py --hdf5-file /data/labeled/train.h5
+
+  The script automatically detects existing checkpoints in --checkpoint-dir and:
+  - Loads the failure head weights from best_classifier.pth
+  - Restores the iteration count
+  - Preserves the best eval score
+
+Resume from explicit checkpoint:
 
   python dino_wm/train_dino_classifier.py \
     --hdf5-file /data/labeled/train.h5 \
@@ -363,21 +372,13 @@ def main():
         **MODEL_CONFIG
     ).to(device)
     
-    if args.resume_checkpoint is not None:
-        print(f"Resuming from checkpoint: {args.resume_checkpoint}")
-        ckpt = torch.load(args.resume_checkpoint, map_location=device)
-        # Resume only the failure head (world model remains frozen).
-        if isinstance(ckpt, dict) and 'failure_head_state_dict' in ckpt:
-            transition.failure_head.load_state_dict(ckpt['failure_head_state_dict'])
-        else:
-            transition.failure_head.load_state_dict(ckpt)
+    # Always load the world model backbone first
+    print(f"Loading world model from {args.wm_checkpoint}")
+    wm_ckpt = torch.load(args.wm_checkpoint, map_location=device)
+    if isinstance(wm_ckpt, dict) and 'model_state_dict' in wm_ckpt:
+        transition.load_state_dict(wm_ckpt['model_state_dict'])
     else:
-        print(f"Loading world model from {args.wm_checkpoint}")
-        wm_ckpt = torch.load(args.wm_checkpoint, map_location=device)
-        if isinstance(wm_ckpt, dict) and 'model_state_dict' in wm_ckpt:
-            transition.load_state_dict(wm_ckpt['model_state_dict'])
-        else:
-            transition.load_state_dict(wm_ckpt)
+        transition.load_state_dict(wm_ckpt)
 
     # Freeze all parameters except failure head
     for name, param in transition.named_parameters():
@@ -388,20 +389,73 @@ def main():
         {'params': transition.failure_head.parameters(), 'lr': args.learning_rate}, 
     ])
 
-    # Load best_eval from existing best checkpoint to persist across sessions
+    # Load checkpoint for resuming training
     best_eval = float('inf')
+    start_iter = args.start_iter
     best_ckpt_path = os.path.join(args.checkpoint_dir, 'best_classifier.pth')
-    if os.path.exists(best_ckpt_path):
+    
+    # Determine which checkpoint to load for failure head:
+    # 1. If --resume-checkpoint is explicitly passed, use that
+    # 2. Else if best_classifier.pth exists, auto-load from there
+    # 3. Else train from scratch
+    
+    if args.resume_checkpoint is not None:
+        # Explicit checkpoint specified
+        print(f"\n{'='*60}")
+        print(f"RESUMING TRAINING - Using explicit checkpoint")
+        print(f"{'='*60}")
+        ckpt = torch.load(args.resume_checkpoint, map_location=device)
+        if isinstance(ckpt, dict):
+            if 'failure_head_state_dict' in ckpt:
+                transition.failure_head.load_state_dict(ckpt['failure_head_state_dict'])
+                print(f"  Loaded failure head weights from: {args.resume_checkpoint}")
+            else:
+                transition.failure_head.load_state_dict(ckpt)
+                print(f"  Loaded failure head weights from: {args.resume_checkpoint}")
+            if 'best_eval' in ckpt:
+                best_eval = ckpt['best_eval']
+                print(f"  Previous best eval loss: {best_eval:.4f}")
+            if 'iteration' in ckpt and args.start_iter == 0:
+                start_iter = ckpt['iteration'] + 1
+                print(f"  Resuming from iteration: {start_iter}")
+            elif args.start_iter > 0:
+                print(f"  Using explicit start iteration: {args.start_iter}")
+        else:
+            transition.failure_head.load_state_dict(ckpt)
+            print(f"  Loaded failure head weights from: {args.resume_checkpoint}")
+            if args.start_iter > 0:
+                print(f"  Using explicit start iteration: {args.start_iter}")
+        print(f"{'='*60}\n")
+        
+    elif os.path.exists(best_ckpt_path):
+        # Auto-load from best checkpoint
+        print(f"\n{'='*60}")
+        print(f"RESUMING TRAINING - Found existing checkpoint")
+        print(f"{'='*60}")
         best_ckpt = torch.load(best_ckpt_path, map_location=device)
         if isinstance(best_ckpt, dict):
             if 'failure_head_state_dict' in best_ckpt:
                 transition.failure_head.load_state_dict(best_ckpt['failure_head_state_dict'])
+                print(f"  Loaded failure head weights from: {best_ckpt_path}")
             if 'best_eval' in best_ckpt:
                 best_eval = best_ckpt['best_eval']
-                print(f"Loaded previous best eval: {best_eval:.4f}")
+                print(f"  Previous best eval loss: {best_eval:.4f}")
+            if 'iteration' in best_ckpt and args.start_iter == 0:
+                start_iter = best_ckpt['iteration'] + 1
+                print(f"  Resuming from iteration: {start_iter}")
+            elif args.start_iter > 0:
+                print(f"  Using explicit start iteration: {args.start_iter}")
+        print(f"{'='*60}\n")
+        
+    else:
+        # Training from scratch
+        print(f"\n{'='*60}")
+        print(f"TRAINING FROM SCRATCH - No existing checkpoint found")
+        print(f"  Checkpoint dir: {args.checkpoint_dir}")
+        print(f"  Starting from iteration: {start_iter}")
+        print(f"{'='*60}\n")
     
     train_iter = args.train_iters
-    start_iter = args.start_iter
 
     for i in tqdm(range(start_iter, train_iter), desc="Training", unit="iter"):
         if i > 0 and i % len(expert_loader) == 0:
@@ -552,17 +606,19 @@ def main():
             print(f"\rIter {i}, Eval Loss: {loss.item():.4f},")
 
             os.makedirs(args.checkpoint_dir, exist_ok=True)
-            torch.save(
-                transition.failure_head.state_dict(),
-                os.path.join(args.checkpoint_dir, 'classifier.pth')
-            )
+            # Save latest checkpoint with iteration for resuming
+            torch.save({
+                'failure_head_state_dict': transition.failure_head.state_dict(),
+                'iteration': i,
+            }, os.path.join(args.checkpoint_dir, 'classifier.pth'))
 
             if loss < best_eval:
                 best_eval = loss
                 print(f"New best at iter {i}, saving model.")
                 torch.save({
                     'failure_head_state_dict': transition.failure_head.state_dict(),
-                    'best_eval': best_eval.item() if hasattr(best_eval, 'item') else best_eval
+                    'best_eval': best_eval.item() if hasattr(best_eval, 'item') else best_eval,
+                    'iteration': i,
                 }, os.path.join(args.checkpoint_dir, 'best_classifier.pth'))
 
             

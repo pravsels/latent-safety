@@ -44,6 +44,11 @@ echo "Node: ${SLURM_NODELIST}"
 echo "Started (UTC): ${start_time}"
 echo "===================================="
 
+# Resume from iteration 3001 (previous run completed iter 3000)
+# Note: Once a new checkpoint is saved with iteration info, this can be removed
+# and the script will auto-resume from the stored iteration.
+START_ITER=3001
+
 TRAIN_CMD="python dino_wm/train_dino_classifier.py \
     --hdf5-file ${HDF5_FILE} \
     --dataset-stats ${DATASET_STATS} \
@@ -54,7 +59,8 @@ TRAIN_CMD="python dino_wm/train_dino_classifier.py \
     --sequence-length ${SEQUENCE_LENGTH} \
     --wandb-project ${WANDB_PROJECT} \
     --wandb-name ${WANDB_NAME} \
-    --checkpoint-dir ${CHECKPOINT_DIR}"
+    --checkpoint-dir ${CHECKPOINT_DIR} \
+    --start-iter ${START_ITER}"
 
 echo "Running training command..."
 echo "Command: ${TRAIN_CMD}"
