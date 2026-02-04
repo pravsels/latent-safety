@@ -6,36 +6,6 @@ from torchvision import transforms
 from PIL import Image
 from dino_wm.config import MODEL_CONFIG, get_dino_config
 
-# --- Monkeypatch for LeRobot Dataset ---
-# Fixes "ValueError: too many dimensions 'str'" when loading datasets with string columns
-import lerobot.datasets.lerobot_dataset
-
-def safe_hf_transform_to_torch(items_dict: dict) -> dict:
-    for key in items_dict:
-        values = items_dict[key]
-        if hasattr(values, "to_pylist"):
-            values = values.to_pylist()
-        elif not isinstance(values, (list, tuple)):
-            values = list(values)
-        if not values:
-            items_dict[key] = values
-            continue
-        first_item = values[0]
-        if isinstance(first_item, Image.Image):
-            to_tensor = transforms.ToTensor()
-            items_dict[key] = [to_tensor(img) for img in values]
-        elif first_item is None:
-            items_dict[key] = values
-        elif isinstance(first_item, (list, tuple, np.ndarray)) and len(first_item) > 0 and isinstance(first_item[0], str):
-            # Skip conversion for list of strings
-            items_dict[key] = values
-        else:
-            # Convert everything else to tensors, skipping individual strings
-            items_dict[key] = [x if isinstance(x, str) else torch.tensor(x) for x in values]
-    return items_dict
-
-lerobot.datasets.lerobot_dataset.hf_transform_to_torch = safe_hf_transform_to_torch
-
 # --- Transforms & Model ---
 
 def get_dino_model(device: str, version: str | None = None):
