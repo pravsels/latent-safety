@@ -21,7 +21,7 @@ SCRATCH_WEIGHTS="/scratch/u6cr/pravsels.u6cr/latent_safety/weights"
 PYTHON_PACKAGES="/scratch/u6cr/pravsels.u6cr/latent_safety/python_packages"
 
 # Input/Output config
-DATASETS_LIST="${repo_dir}/arx5_datasets_new.json"
+DATASETS_LIST="${scratch_dir}/arx5_datasets_new.json"
 OUTPUT_HDF5="${scratch_dir}/arx5_datasets_new.h5"
 BATCH_SIZE=256
 
