@@ -37,7 +37,7 @@ start_iter: 0
 
 # WandB
 wandb_mode: offline
-wandb_project: dino-WM
+wandb_project: dino-WM-action-horizon
 wandb_entity: pravsels
 wandb_name: dinov3-wm
 
