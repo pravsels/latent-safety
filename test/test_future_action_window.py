@@ -14,9 +14,7 @@ def test_future_action_window_sampling():
     rng = random.Random(0)
     length = sample_future_action_window(
         action_horizon=100,
-        future_action_max_steps=50,
-        future_action_small_max_steps=20,
-        future_action_small_prob=0.8,
+        future_action_steps_train=50,
         rng=rng,
     )
     assert 1 <= length <= 50
@@ -24,9 +22,7 @@ def test_future_action_window_sampling():
     rng = random.Random(1)
     length = sample_future_action_window(
         action_horizon=3,
-        future_action_max_steps=50,
-        future_action_small_max_steps=20,
-        future_action_small_prob=0.8,
+        future_action_steps_train=50,
         rng=rng,
     )
     assert 1 <= length <= 3
@@ -37,12 +33,10 @@ def test_future_action_window_prefers_small():
     samples = [
         sample_future_action_window(
             action_horizon=100,
-            future_action_max_steps=50,
-            future_action_small_max_steps=20,
-            future_action_small_prob=0.8,
+            future_action_steps_train=50,
             rng=rng,
         )
         for _ in range(1000)
     ]
     small = sum(1 for s in samples if s <= 20)
-    assert small / len(samples) >= 0.7
+    assert 1 <= min(samples) <= max(samples) <= 50

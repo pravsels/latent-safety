@@ -8,7 +8,7 @@ dataset_stats: arx5_datasets_new_stats.json
 test_frac: 0.1
 
 # Training
-batch_size: 64
+batch_size: 32
 train_iters: 100000
 device: "cuda:0"
 seed: 0
@@ -17,9 +17,7 @@ sequence_length: 4
 pred_step: 1
 # Number of future raw-frame actions to condition on.
 action_horizon: 100
-future_action_max_steps: 50
-future_action_small_max_steps: 20
-future_action_small_prob: 0.8
+future_action_steps_train: 50
 eval_horizon: 16
 context_length: 3
 eval_interval: 1000

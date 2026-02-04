@@ -259,31 +259,18 @@ def compute_eval_t_plus_k_indices(
 def sample_future_action_window(
     *,
     action_horizon: int,
-    future_action_max_steps: int,
-    future_action_small_max_steps: int,
-    future_action_small_prob: float,
+    future_action_steps_train: int,
     rng: random.Random | None = None,
 ) -> int:
     if action_horizon < 1:
         raise ValueError(f"action_horizon must be >= 1 (got {action_horizon})")
-    if future_action_max_steps < 1:
-        raise ValueError(f"future_action_max_steps must be >= 1 (got {future_action_max_steps})")
-    if future_action_small_max_steps < 1:
+    if future_action_steps_train < 1:
         raise ValueError(
-            f"future_action_small_max_steps must be >= 1 (got {future_action_small_max_steps})"
+            f"future_action_steps_train must be >= 1 (got {future_action_steps_train})"
         )
-    if not (0.0 <= future_action_small_prob <= 1.0):
-        raise ValueError(
-            f"future_action_small_prob must be in [0, 1] (got {future_action_small_prob})"
-        )
-    max_len = min(action_horizon, future_action_max_steps)
+    max_len = min(action_horizon, future_action_steps_train)
     rng = rng or random
-    small_cap = min(future_action_small_max_steps, max_len)
-    if max_len <= small_cap:
-        return int(rng.randint(1, max_len))
-    if rng.random() < future_action_small_prob:
-        return int(rng.randint(1, small_cap))
-    return int(rng.randint(small_cap + 1, max_len))
+    return int(rng.randint(1, max_len))
 
 
 def parse_args(argv=None):
@@ -374,22 +361,10 @@ def parse_args(argv=None):
         help="Number of future raw-frame actions to condition on (default: 100).",
     )
     parser.add_argument(
-        "--future-action-max-steps",
+        "--future-action-steps-train",
         type=int,
         default=50,
-        help="Max number of future actions to sample for conditioning (default: 50).",
-    )
-    parser.add_argument(
-        "--future-action-small-max-steps",
-        type=int,
-        default=20,
-        help="Upper bound for preferred small windows (default: 20).",
-    )
-    parser.add_argument(
-        "--future-action-small-prob",
-        type=float,
-        default=0.8,
-        help="Probability of sampling from small windows (default: 0.8).",
+        help="Max number of future actions to sample for training (default: 50).",
     )
     parser.add_argument(
         "--eval-interval",
@@ -538,9 +513,7 @@ def main():
     pred_step = int(args.pred_step)
     action_agg = "start"
     action_horizon = int(args.action_horizon)
-    future_action_max_steps = int(args.future_action_max_steps)
-    future_action_small_max_steps = int(args.future_action_small_max_steps)
-    future_action_small_prob = float(args.future_action_small_prob)
+    future_action_steps_train = int(args.future_action_steps_train)
     if is_distributed and str(args.device).startswith("cuda"):
         device = f"cuda:{local_rank}"
     else:
@@ -557,17 +530,9 @@ def main():
     
     if action_horizon < 1:
         raise ValueError(f"--action-horizon must be >= 1 (got {action_horizon}).")
-    if future_action_max_steps < 1:
+    if future_action_steps_train < 1:
         raise ValueError(
-            f"--future-action-max-steps must be >= 1 (got {future_action_max_steps})."
-        )
-    if future_action_small_max_steps < 1:
-        raise ValueError(
-            f"--future-action-small-max-steps must be >= 1 (got {future_action_small_max_steps})."
-        )
-    if not (0.0 <= future_action_small_prob <= 1.0):
-        raise ValueError(
-            f"--future-action-small-prob must be in [0, 1] (got {future_action_small_prob})."
+            f"--future-action-steps-train must be >= 1 (got {future_action_steps_train})."
         )
     if int(args.eval_samples) < 1:
         raise ValueError(f"--eval-samples must be >= 1 (got {args.eval_samples}).")
@@ -773,9 +738,7 @@ def main():
         t = int(ctx_idx[-1].item())
         future_len = sample_future_action_window(
             action_horizon=action_horizon,
-            future_action_max_steps=future_action_max_steps,
-            future_action_small_max_steps=future_action_small_max_steps,
-            future_action_small_prob=future_action_small_prob,
+            future_action_steps_train=future_action_steps_train,
         )
         future_slice = slice(t, t + future_len)
         ar_future_slice = slice(t + 1, t + 1 + future_len)
@@ -913,9 +876,7 @@ def main():
                     t = int(ctx_idx[-1].item())
                     future_len = sample_future_action_window(
                         action_horizon=action_horizon,
-                        future_action_max_steps=future_action_max_steps,
-                        future_action_small_max_steps=future_action_small_max_steps,
-                        future_action_small_prob=future_action_small_prob,
+                        future_action_steps_train=future_action_steps_train,
                     )
                     input_front_embd_eval = gt_front_embd_eval.index_select(1, ctx_idx)
 
