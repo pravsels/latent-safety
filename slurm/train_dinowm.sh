@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=dino_wm
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:1
-#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --ntasks-per-node=4
 #SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=64G
@@ -70,7 +70,7 @@ echo "Command: ${STATS_CMD} && ${TRAIN_CMD}"
 echo ""
 
 set +e
-srun --ntasks=1 --gpus-per-task=1 --cpu-bind=cores \
+srun --ntasks=4 --gpus-per-task=1 --cpu-bind=cores \
 apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \

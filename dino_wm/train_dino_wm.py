@@ -24,8 +24,10 @@ import torch
 import random
 import wandb
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel
 import torch.nn.functional as F
 from einops import rearrange
 import matplotlib.pyplot as plt
@@ -82,6 +84,43 @@ def _load_yaml_config(path: str) -> dict:
     if not isinstance(cfg, dict):
         raise ValueError(f"Config must be a mapping (YAML dict). Got: {type(cfg)}")
     return cfg
+
+
+def init_distributed_from_env() -> tuple[int, int, int, bool]:
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    is_distributed = world_size > 1
+    if is_distributed:
+        torch.distributed.init_process_group(
+            backend="nccl",
+            rank=rank,
+            world_size=world_size,
+        )
+        torch.cuda.set_device(local_rank)
+    return rank, world_size, local_rank, is_distributed
+
+
+def build_train_loader(
+    dataset: torch.utils.data.Dataset,
+    batch_size: int,
+    *,
+    is_distributed: bool,
+    rank: int,
+    world_size: int,
+) -> tuple[DataLoader, DistributedSampler | None]:
+    if is_distributed:
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+        )
+        loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+    else:
+        sampler = None
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    return loader, sampler
 
 
 def _compute_lr_factor(
@@ -429,14 +468,18 @@ def parse_args(argv=None):
 def main():
     args = parse_args()
 
+    rank, world_size, local_rank, is_distributed = init_distributed_from_env()
+    is_rank0 = rank == 0
+
     # Initialize wandb
-    wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_name,
-        entity=args.wandb_entity,
-        mode=args.wandb_mode,
-        config=vars(args)
-    )
+    if is_rank0:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_name,
+            entity=args.wandb_entity,
+            mode=args.wandb_mode,
+            config=vars(args),
+        )
 
     # Set seeds
     torch.manual_seed(args.seed)
@@ -454,7 +497,10 @@ def main():
     pred_step = int(args.pred_step)
     action_agg = str(args.action_aggregation)
     action_horizon = int(args.action_horizon)
-    device = args.device
+    if is_distributed and str(args.device).startswith("cuda"):
+        device = f"cuda:{local_rank}"
+    else:
+        device = args.device
 
     if BL < 2:
         raise ValueError(f"--sequence-length must be >= 2 (got {BL}).")
@@ -531,7 +577,14 @@ def main():
     print(f"  Train: {num_traj - num_test} trajectories")
     print(f"  Eval:  {num_test} trajectories")
 
-    expert_loader = iter(DataLoader(expert_data, batch_size=BS, shuffle=True))
+    train_loader, train_sampler = build_train_loader(
+        expert_data,
+        BS,
+        is_distributed=is_distributed,
+        rank=rank,
+        world_size=world_size,
+    )
+    expert_loader = iter(train_loader)
     expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
     expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
 
@@ -559,18 +612,22 @@ def main():
         **MODEL_CONFIG
     ).to(device)
 
+    if is_distributed:
+        transition = DistributedDataParallel(transition, device_ids=[local_rank])
+    transition_module = transition.module if is_distributed else transition
+
     transition.train()
 
     # Optimizer
     optimizer = AdamW([
-        {'params': transition.transformer.parameters(), 'lr': 5e-5},
-        {'params': transition.state_head.parameters(), 'lr': 5e-5},
-        {'params': transition.front_head.parameters(), 'lr': 5e-5},
-        {'params': transition.wrist_head.parameters(), 'lr': 5e-5},
-        {'params': transition.action_encoder.parameters(), 'lr': 5e-4},
-        {'params': transition.state_encoder.parameters(), 'lr': 5e-4},
-        {'params': [transition.pos_embedding], 'lr': 5e-4},
-        {'params': [transition.temp_embedding], 'lr': 5e-4}
+        {'params': transition_module.transformer.parameters(), 'lr': 5e-5},
+        {'params': transition_module.state_head.parameters(), 'lr': 5e-5},
+        {'params': transition_module.front_head.parameters(), 'lr': 5e-5},
+        {'params': transition_module.wrist_head.parameters(), 'lr': 5e-5},
+        {'params': transition_module.action_encoder.parameters(), 'lr': 5e-4},
+        {'params': transition_module.state_encoder.parameters(), 'lr': 5e-4},
+        {'params': [transition_module.pos_embedding], 'lr': 5e-4},
+        {'params': [transition_module.temp_embedding], 'lr': 5e-4}
     ])
     base_lrs = [pg['lr'] for pg in optimizer.param_groups]
 
@@ -594,7 +651,7 @@ def main():
         print(f"Resuming from checkpoint: {resume_path}")
         ckpt = torch.load(resume_path, map_location=device)
         if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-            transition.load_state_dict(ckpt['model_state_dict'])
+            transition_module.load_state_dict(ckpt['model_state_dict'])
             if 'optimizer_state_dict' in ckpt:
                 try:
                     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
@@ -605,7 +662,7 @@ def main():
             if 'best_eval' in ckpt and best_eval == float('inf'):
                 best_eval = ckpt['best_eval']
         else:
-            transition.load_state_dict(ckpt)
+            transition_module.load_state_dict(ckpt)
 
     transition.train()
 
@@ -614,7 +671,7 @@ def main():
 
     def _make_ckpt_dict(iter_idx: int) -> dict:
         return {
-            'model_state_dict': transition.state_dict(),
+            'model_state_dict': transition_module.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'iter': int(iter_idx),
             'best_eval': float(best_eval),
@@ -633,8 +690,17 @@ def main():
         for pg, base_lr in zip(optimizer.param_groups, base_lrs):
             pg['lr'] = base_lr * lr_factor
 
-        if i > 0 and i % len(expert_loader) == 0:
-            expert_loader = iter(DataLoader(expert_data, batch_size=BS, shuffle=True))
+        if i > 0 and i % len(train_loader) == 0:
+            if train_sampler is not None:
+                train_sampler.set_epoch(i)
+            train_loader, train_sampler = build_train_loader(
+                expert_data,
+                BS,
+                is_distributed=is_distributed,
+                rank=rank,
+                world_size=world_size,
+            )
+            expert_loader = iter(train_loader)
         if i > 0 and i % len(expert_loader_eval) == 0:
             expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
         if i > 0 and i % len(expert_loader_imagine) == 0:
@@ -725,10 +791,10 @@ def main():
 
         # Norms and Step
         scaler.unscale_(optimizer)
-        grad_norm = _global_grad_norm(transition.parameters())
+        grad_norm = _global_grad_norm(transition_module.parameters())
         scaler.step(optimizer)
         scaler.update()
-        weight_norm = _global_weight_norm(transition.parameters())
+        weight_norm = _global_weight_norm(transition_module.parameters())
 
         train_loss = loss.item()
         print(
@@ -736,21 +802,22 @@ def main():
             end='',
             flush=True
         )
-        wandb.log({
-            'train_loss': loss_tf,
-            'train_loss_ar': loss_ar,
-            'grad_norm': grad_norm,
-            'weight_norm': weight_norm,
-            'lr': optimizer.param_groups[0]['lr'],
-            'lr_factor': lr_factor,
-        })
+        if is_rank0:
+            wandb.log({
+                'train_loss': loss_tf,
+                'train_loss_ar': loss_ar,
+                'grad_norm': grad_norm,
+                'weight_norm': weight_norm,
+                'lr': optimizer.param_groups[0]['lr'],
+                'lr_factor': lr_factor,
+            })
 
         # Periodic "latest" checkpoint
-        if args.save_every and (i % args.save_every == 0):
+        if is_rank0 and args.save_every and (i % args.save_every == 0):
             torch.save(_make_ckpt_dict(i), latest_ckpt_path)
 
         # Evaluation
-        if (i) % args.eval_interval == 0:
+        if is_rank0 and (i) % args.eval_interval == 0:
             iters.append(i)
             transition.eval()
 
@@ -871,8 +938,9 @@ def main():
                 })
             wandb.log(log_dict)
 
-    plt.legend()
-    plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
+    if is_rank0:
+        plt.legend()
+        plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
 
     best_eval_val = best_eval.item() if hasattr(best_eval, 'item') else best_eval
     print(f"\nTraining complete. Best eval loss: {best_eval_val:.4f}")
