@@ -22,6 +22,7 @@ import h5py
 import numpy as np
 import torch
 from tqdm import tqdm
+from datasets import load_dataset
 
 # Import shared utilities
 try:
@@ -140,7 +141,7 @@ def process_dataset_object(
     if missing_attrs:
         print(
             f"❌ Dataset missing required attributes {missing_attrs}. "
-            "RoboCandyWrapper dataset must be LeRobot-compatible."
+            "Dataset must be LeRobot-compatible."
         )
         return start_traj_idx
 
@@ -363,6 +364,46 @@ def process_dataset_object(
     
     return start_traj_idx
 
+
+def process_wrapped_dataset(
+    wrapped_dataset,
+    hdf_file: h5py.File,
+    dino_model: torch.nn.Module,
+    device: str,
+    batch_size: int,
+    max_episodes: Optional[int],
+    start_traj_idx: int,
+    min_length: int,
+    resume: bool = False,
+) -> int:
+    datasets = getattr(wrapped_dataset, "_datasets", None)
+    if not datasets:
+        print("❌ Wrapped dataset missing internal datasets list.")
+        return start_traj_idx
+    for dataset in datasets:
+        if SHUTDOWN_REQUESTED:
+            print("\n🛑 Shutdown complete. File has been properly closed.")
+            break
+        repo_id = getattr(dataset, "repo_id", "unknown")
+        # Check disk space
+        usage = shutil.disk_usage(Path(hdf_file.filename).parent)
+        if usage.free < 2 * 1024**3:  # 2GB
+            print("⚠️ Low disk space! Stopping.")
+            break
+        start_traj_idx = process_dataset_object(
+            dataset=dataset,
+            dataset_id=repo_id,
+            hdf_file=hdf_file,
+            dino_model=dino_model,
+            device=device,
+            batch_size=batch_size,
+            max_episodes=max_episodes,
+            start_traj_idx=start_traj_idx,
+            min_length=min_length,
+            resume=resume,
+        )
+    return start_traj_idx
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--datasets-list", type=str, required=True)
@@ -463,7 +504,7 @@ def main():
                     skipped_repo_ids = []
                     for repo_id in dataset_ids:
                         try:
-                            probe = make_dataset_without_config([repo_id])
+                            probe = load_dataset(repo_id, split="train")
                             feature_keys = set(getattr(probe, "features", {}).keys())
                             if required_keys.issubset(feature_keys):
                                 valid_repo_ids.append(repo_id)
@@ -475,10 +516,9 @@ def main():
                     if skipped_repo_ids:
                         print(f"⚠️ Skipping {len(skipped_repo_ids)} repos missing required keys.")
                     print(f"🍬 Loading RoboCandyWrapper dataset for {len(valid_repo_ids)} repos...")
-                    dataset = make_dataset_without_config(valid_repo_ids)
-                    traj_counter = process_dataset_object(
-                        dataset=dataset,
-                        dataset_id="mixed",
+                    wrapped_dataset = make_dataset_without_config(valid_repo_ids)
+                    traj_counter = process_wrapped_dataset(
+                        wrapped_dataset=wrapped_dataset,
                         hdf_file=hf_out,
                         dino_model=dino_model,
                         device=device,
@@ -486,7 +526,7 @@ def main():
                         max_episodes=args.max_episodes_per_dataset,
                         start_traj_idx=traj_counter,
                         min_length=2,
-                        resume=(mode == "a")
+                        resume=(mode == "a"),
                     )
         
         # Final flush
