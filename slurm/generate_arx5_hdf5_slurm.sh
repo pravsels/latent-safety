@@ -19,6 +19,7 @@ container="${scratch_dir}/container/latent_safety_arm64.sif"
 HF_CACHE="/scratch/u6cr/pravsels.u6cr/huggingface_cache"
 SCRATCH_WEIGHTS="/scratch/u6cr/pravsels.u6cr/latent_safety/weights"
 PYTHON_PACKAGES="/scratch/u6cr/pravsels.u6cr/latent_safety/python_packages"
+HF_TOKEN_FILE="${home_dir}/.hf_token"
 
 # Input/Output config
 DATASETS_LIST="${scratch_dir}/arx5_datasets_new.json"
@@ -26,6 +27,13 @@ OUTPUT_HDF5="${scratch_dir}/arx5_datasets_new.h5"
 BATCH_SIZE=256
 
 mkdir -p "${scratch_dir}" "${HF_CACHE}" "${PYTHON_PACKAGES}"
+
+if [[ -f "${HF_TOKEN_FILE}" ]]; then
+  export HF_TOKEN
+  HF_TOKEN="$(cat "${HF_TOKEN_FILE}")"
+else
+  echo "Warning: HF token file not found at ${HF_TOKEN_FILE}. Proceeding unauthenticated."
+fi
 
 start_time="$(date -Is --utc)"
 
@@ -46,6 +54,7 @@ apptainer exec --nv \
     --bind "${HF_CACHE}:/root/.cache/huggingface" \
     --bind "${SCRATCH_WEIGHTS}:${repo_dir}/weights" \
     --env "HF_HOME=/root/.cache/huggingface" \
+    --env "HF_TOKEN=${HF_TOKEN:-}" \
     "${container}" \
     bash -c "export PYTHONPATH=${PYTHON_PACKAGES}:${repo_dir}:\$PYTHONPATH && ${GEN_CMD}"
 
