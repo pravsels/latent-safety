@@ -6,6 +6,7 @@
 hdf5_file: arx5_datasets_new.h5
 dataset_stats: arx5_datasets_new_stats.json
 test_frac: 0.1
+action_key: actions_delta
 
 # Training
 batch_size: 32

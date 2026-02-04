@@ -240,6 +240,10 @@ action_min = torch.tensor(stats['action_min']).float().to(device)
 action_max = torch.tensor(stats['action_max']).float().to(device)
 state_min = torch.tensor(stats['state_min']).float().to(device)
 state_max = torch.tensor(stats['state_max']).float().to(device)
+action_q02 = torch.tensor(stats['action_delta_q02']).float().to(device) if "action_delta_q02" in stats else None
+action_q98 = torch.tensor(stats['action_delta_q98']).float().to(device) if "action_delta_q98" in stats else None
+state_q02 = torch.tensor(stats['state_q02']).float().to(device) if "state_q02" in stats else None
+state_q98 = torch.tensor(stats['state_q98']).float().to(device) if "state_q98" in stats else None
 
 wm = VideoTransformer(
         state_dim=state_dim,  # Inferred from dataset stats
@@ -480,12 +484,18 @@ if __name__ == "__main__":
         inputs2 = data['cam_rs_embd'][[0], :H].to(device)
         inputs1 = data['cam_zed_embd'][[0], :H].to(device)
         all_acs = data['action'][[0]].to(device)
-        all_acs = normalize_acs(all_acs, action_min, action_max)
+        all_acs = normalize_acs(
+            all_acs, action_min, action_max, q02=action_q02, q98=action_q98
+        )
         all_fails = data['failure'][[0]].to(device)
         acs = data['action'][[0],:H].to(device)
-        acs = normalize_acs(acs, action_min, action_max)
+        acs = normalize_acs(
+            acs, action_min, action_max, q02=action_q02, q98=action_q98
+        )
         states = data['state'][[0],:H].to(device)
-        states = normalize_states(states, state_min, state_max)
+        states = normalize_states(
+            states, state_min, state_max, q02=state_q02, q98=state_q98
+        )
         im1s = (data['agentview_image'][[0], :H].squeeze().to(device)/255.).detach().cpu().numpy()
         im2s = (data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.).detach().cpu().numpy()
         
@@ -566,17 +576,25 @@ if __name__ == "__main__":
         inputs2 = data['cam_rs_embd'][[0], :H].to(device)
         inputs1 = data['cam_zed_embd'][[0], :H].to(device)
         all_acs = data['action'][[0]].to(device)
-        all_acs = normalize_acs(all_acs, action_min, action_max)
+        all_acs = normalize_acs(
+            all_acs, action_min, action_max, q02=action_q02, q98=action_q98
+        )
         all_states = data['state'][[0]].to(device)
-        all_states = normalize_states(all_states, state_min, state_max)
+        all_states = normalize_states(
+            all_states, state_min, state_max, q02=state_q02, q98=state_q98
+        )
         all_in2s = data['cam_rs_embd'][[0]].squeeze().to(device)
         all_in1s = data['cam_zed_embd'][[0]].squeeze().to(device)
 
 
         acs = data['action'][[0],:H].to(device)
-        acs = normalize_acs(acs, action_min, action_max)
+        acs = normalize_acs(
+            acs, action_min, action_max, q02=action_q02, q98=action_q98
+        )
         states = data['state'][[0],:H].to(device)
-        states = normalize_states(states, state_min, state_max)
+        states = normalize_states(
+            states, state_min, state_max, q02=state_q02, q98=state_q98
+        )
         im1s = (data['agentview_image'][[0], :H].squeeze().to(device)/255.).detach().cpu().numpy()
         im2s = (data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.).detach().cpu().numpy()
         pred_failures = []

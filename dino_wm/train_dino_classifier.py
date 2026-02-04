@@ -111,6 +111,12 @@ def main():
         help="Path to HDF5 file. Will be split into train/test using --test-frac.",
     )
     parser.add_argument(
+        "--action-key",
+        type=str,
+        default="actions_delta",
+        help="Action dataset key to load (default: actions_delta).",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=TRAIN_CONFIG['batch_size'],
@@ -312,6 +318,10 @@ def main():
     action_max = torch.tensor(stats['action_max']).float().to(device)
     state_min = torch.tensor(stats['state_min']).float().to(device)
     state_max = torch.tensor(stats['state_max']).float().to(device)
+    action_q02 = torch.tensor(stats['action_delta_q02']).float().to(device) if "action_delta_q02" in stats else None
+    action_q98 = torch.tensor(stats['action_delta_q98']).float().to(device) if "action_delta_q98" in stats else None
+    state_q02 = torch.tensor(stats['state_q02']).float().to(device) if "state_q02" in stats else None
+    state_q98 = torch.tensor(stats['state_q98']).float().to(device) if "state_q98" in stats else None
     
     # Infer dimensions from stats
     state_dim = len(stats['state_min'])
@@ -334,9 +344,15 @@ def main():
     if num_traj - num_test < 1 and num_traj > 1:
         num_test = num_traj - 1
     
-    expert_data = SplitTrajectoryDataset(hdf5_file, BL, split='train', num_test=num_test)
-    expert_data_eval = SplitTrajectoryDataset(hdf5_file, BL, split='test', num_test=num_test)
-    expert_data_imagine = SplitTrajectoryDataset(hdf5_file, 32, split='test', num_test=num_test)
+    expert_data = SplitTrajectoryDataset(
+        hdf5_file, BL, split='train', num_test=num_test, action_key=args.action_key
+    )
+    expert_data_eval = SplitTrajectoryDataset(
+        hdf5_file, BL, split='test', num_test=num_test, action_key=args.action_key
+    )
+    expert_data_imagine = SplitTrajectoryDataset(
+        hdf5_file, 32, split='test', num_test=num_test, action_key=args.action_key
+    )
     
     print(f"Dataset: {hdf5_file}")
     print(f"  Train: {num_traj - num_test} trajectories")
@@ -473,11 +489,15 @@ def main():
         inputs2 = data2[:, :-1]
 
         data_state = data['state'].to(device)
-        norm_states = normalize_states(data_state, state_min, state_max)
+        norm_states = normalize_states(
+            data_state, state_min, state_max, q02=state_q02, q98=state_q98
+        )
         states = norm_states[:, :-1]
 
         data_acs = data['action'].to(device)
-        norm_acs = normalize_acs(data_acs, action_min, action_max)
+        norm_acs = normalize_acs(
+            data_acs, action_min, action_max, q02=action_q02, q98=action_q98
+        )
         acs = norm_acs[:, :-1]
         
         optimizer.zero_grad()
@@ -504,11 +524,17 @@ def main():
                 inputs1 = eval_data1[[0], :H]
                 inputs2 = eval_data2[[0], :H]
                 all_acs = eval_data['action'][[0]].to(device)
-                all_acs = normalize_acs(all_acs, action_min, action_max)
+                all_acs = normalize_acs(
+                    all_acs, action_min, action_max, q02=action_q02, q98=action_q98
+                )
                 acs = eval_data['action'][[0],:H].to(device)
-                acs = normalize_acs(acs, action_min, action_max)
+                acs = normalize_acs(
+                    acs, action_min, action_max, q02=action_q02, q98=action_q98
+                )
                 eval_states = eval_data['state'][[0],:H].to(device)
-                states = normalize_states(eval_states, state_min, state_max)
+                states = normalize_states(
+                    eval_states, state_min, state_max, q02=state_q02, q98=state_q98
+                )
                 
                 # Get decoder output size from config
                 decoder_h, decoder_w = DECODER_CONFIG['decoder_image_size']
@@ -592,11 +618,15 @@ def main():
                 inputs2 = data2[:, :-1]
 
                 data_state = eval_data['state'].to(device)
-                norm_eval_states = normalize_states(data_state, state_min, state_max)
+                norm_eval_states = normalize_states(
+                    data_state, state_min, state_max, q02=state_q02, q98=state_q98
+                )
                 states = norm_eval_states[:, :-1]
 
                 data_acs = eval_data['action'].to(device)
-                norm_acs = normalize_acs(data_acs, action_min, action_max)
+                norm_acs = normalize_acs(
+                    data_acs, action_min, action_max, q02=action_q02, q98=action_q98
+                )
                 acs = norm_acs[:, :-1]
 
                 pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs)

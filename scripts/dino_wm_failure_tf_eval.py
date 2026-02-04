@@ -116,6 +116,10 @@ def compute_failure_scores_teacher_forced(
     action_max = stats["action_max"].to(device)
     state_min = stats["state_min"].to(device)
     state_max = stats["state_max"].to(device)
+    action_q02 = stats["action_delta_q02"].to(device) if "action_delta_q02" in stats else None
+    action_q98 = stats["action_delta_q98"].to(device) if "action_delta_q98" in stats else None
+    state_q02 = stats["state_q02"].to(device) if "state_q02" in stats else None
+    state_q98 = stats["state_q98"].to(device) if "state_q98" in stats else None
 
     # Sliding windows start indices
     starts = np.arange(0, T - (num_frames + 1) + 1, dtype=np.int64)  # inclusive
@@ -136,8 +140,12 @@ def compute_failure_scores_teacher_forced(
             st_t = torch.from_numpy(st).to(device=device, dtype=torch.float32)
             ac_t = torch.from_numpy(ac).to(device=device, dtype=torch.float32)
 
-            st_t = normalize_states(st_t, state_min, state_max)
-            ac_t = normalize_acs(ac_t, action_min, action_max)
+            st_t = normalize_states(
+                st_t, state_min, state_max, q02=state_q02, q98=state_q98
+            )
+            ac_t = normalize_acs(
+                ac_t, action_min, action_max, q02=action_q02, q98=action_q98
+            )
 
             _, _, _, pred_fail = transition(zed_t, rs_t, st_t, ac_t)  # (B, num_frames, 1)
             step_scores = pred_fail[:, -1, 0].detach().cpu().numpy().astype(np.float64)
@@ -258,6 +266,14 @@ def main() -> None:
         "state_min": torch.tensor(stats_data["state_min"]).float(),
         "state_max": torch.tensor(stats_data["state_max"]).float(),
     }
+    if "action_delta_q02" in stats_data:
+        stats["action_delta_q02"] = torch.tensor(stats_data["action_delta_q02"]).float()
+    if "action_delta_q98" in stats_data:
+        stats["action_delta_q98"] = torch.tensor(stats_data["action_delta_q98"]).float()
+    if "state_q02" in stats_data:
+        stats["state_q02"] = torch.tensor(stats_data["state_q02"]).float()
+    if "state_q98" in stats_data:
+        stats["state_q98"] = torch.tensor(stats_data["state_q98"]).float()
 
     # Infer dims
     state_dim = len(stats_data["state_min"])

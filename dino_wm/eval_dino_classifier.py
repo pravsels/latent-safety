@@ -171,6 +171,10 @@ if __name__ == "__main__":
     action_max = torch.tensor(stats['action_max']).float().to(device)
     state_min = torch.tensor(stats['state_min']).float().to(device)
     state_max = torch.tensor(stats['state_max']).float().to(device)
+    action_q02 = torch.tensor(stats['action_delta_q02']).float().to(device) if "action_delta_q02" in stats else None
+    action_q98 = torch.tensor(stats['action_delta_q98']).float().to(device) if "action_delta_q98" in stats else None
+    state_q02 = torch.tensor(stats['state_q02']).float().to(device) if "state_q02" in stats else None
+    state_q98 = torch.tensor(stats['state_q98']).float().to(device) if "state_q98" in stats else None
     
     # Infer dimensions from stats
     state_dim = len(stats['state_min'])
@@ -220,12 +224,16 @@ if __name__ == "__main__":
     output2 = data2[:, 1:]
 
     data_state = data['state'].to(device)
-    norm_states = normalize_states(data_state, state_min, state_max)
+    norm_states = normalize_states(
+        data_state, state_min, state_max, q02=state_q02, q98=state_q98
+    )
     states = norm_states[:, :-1]
     output_state = norm_states[:, 1:]
 
     data_acs = data['action'].to(device)
-    norm_acs = normalize_acs(data_acs, action_min, action_max)
+    norm_acs = normalize_acs(
+        data_acs, action_min, action_max, q02=action_q02, q98=action_q98
+    )
     acs = norm_acs[:, :-1]
 
     print(data.keys())
@@ -262,12 +270,16 @@ if __name__ == "__main__":
         output2 = data2[:, 1:]
 
         data_state = data['state'].to(device)
-        norm_eval_states = normalize_states(data_state, state_min, state_max)
+        norm_eval_states = normalize_states(
+            data_state, state_min, state_max, q02=state_q02, q98=state_q98
+        )
         states = norm_eval_states[:, :-1]
         output_state = norm_eval_states[:, 1:]
 
         data_acs = data['action'].to(device)
-        norm_acs = normalize_acs(data_acs, action_min, action_max)
+        norm_acs = normalize_acs(
+            data_acs, action_min, action_max, q02=action_q02, q98=action_q98
+        )
         acs = norm_acs[:, :-1]
         
         pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs)

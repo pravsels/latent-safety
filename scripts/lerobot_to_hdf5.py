@@ -31,6 +31,7 @@ except ImportError:
     from utils import get_dino_model, preprocess_images_for_dino, to_hwc_uint8
     import utils
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from dino_wm.data_utils import write_actions_delta
 
 # Global flag for graceful shutdown
 SHUTDOWN_REQUESTED = False
@@ -295,6 +296,7 @@ def process_dataset(
                     
                     if st_np is not None:
                         grp.create_dataset("states", data=st_np, maxshape=(None, *st_np.shape[1:]), chunks=True)
+                    write_actions_delta(grp, act_np, st_np, initialized=False)
                     datasets_initialized = True
                 else:
                     # Resize and Append
@@ -309,6 +311,7 @@ def process_dataset(
                         if "states" in grp:
                             grp["states"].resize(grp["states"].shape[0] + st_np.shape[0], axis=0)
                             grp["states"][-st_np.shape[0]:] = st_np
+                    write_actions_delta(grp, act_np, st_np, initialized=True)
 
             if SHUTDOWN_REQUESTED:
                 pbar.update(1)

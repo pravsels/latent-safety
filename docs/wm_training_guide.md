@@ -12,6 +12,10 @@ python dino_wm/train_dino_wm.py --config configs/wm_config.yaml
 
 The script supports both YAML configuration and CLI flags. CLI flags will override values specified in the YAML file.
 
+### Data Normalization Defaults
+
+The loaders default to `actions_delta` (actions minus state for shared dims) when present. Stats now include global 2%/98% quantiles (`action_delta_q02/q98`, `state_q02/q98`) and normalization uses those quantiles when available, with a min/max fallback for older stats files.
+
 ## 2. Key Metrics to Track
 
 ### Prediction Accuracy

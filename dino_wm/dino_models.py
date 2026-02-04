@@ -53,45 +53,59 @@ def batch_rotvec_to_quat(rotvecs):
     quaternions = r.as_quat()
     return quaternions
 
-def normalize_acs(acs, min_ac, max_ac):
-    if min_ac.device != acs.device:
-        min_ac = min_ac.to(acs.device)
-    if max_ac.device != acs.device:
-        max_ac = max_ac.to(acs.device)
-        
-    norm_acs = (acs - min_ac) / (max_ac - min_ac)
-    
-    return norm_acs
+def _to_device(value, ref):
+    if value is None:
+        return None
+    if value.device != ref.device:
+        return value.to(ref.device)
+    return value
 
-def unnormalize_acs(acs, min_ac, max_ac):
-    if min_ac.device != acs.device:
-        min_ac = min_ac.to(acs.device)
-    if max_ac.device != acs.device:
-        max_ac = max_ac.to(acs.device)
-    
-    acs = (acs * (max_ac - min_ac)) + min_ac
-    
-    return acs
 
-def normalize_states(states, min_state, max_state):
-    if min_state.device != states.device:
-        min_state = min_state.to(states.device)
-    if max_state.device != states.device:
-        max_state = max_state.to(states.device)
-        
-    norm_states = (states - min_state) / (max_state - min_state)
-    
-    return norm_states
+def normalize_acs(acs, min_ac=None, max_ac=None, q02=None, q98=None, eps: float = 1e-6):
+    q02 = _to_device(q02, acs)
+    q98 = _to_device(q98, acs)
+    if q02 is not None and q98 is not None:
+        denom = q98 - q02
+        if torch.any(denom == 0):
+            denom = denom + eps
+        return (acs - q02) / denom * 2.0 - 1.0
 
-def unnormalize_states(states, min_state, max_state):
-    if min_state.device != states.device:
-        min_state = min_state.to(states.device)
-    if max_state.device != states.device:
-        max_state = max_state.to(states.device)
-    
-    states = (states * (max_state - min_state)) + min_state
-    
-    return states
+    min_ac = _to_device(min_ac, acs)
+    max_ac = _to_device(max_ac, acs)
+    return (acs - min_ac) / (max_ac - min_ac)
+
+def unnormalize_acs(acs, min_ac=None, max_ac=None, q02=None, q98=None):
+    q02 = _to_device(q02, acs)
+    q98 = _to_device(q98, acs)
+    if q02 is not None and q98 is not None:
+        return ((acs + 1.0) / 2.0) * (q98 - q02) + q02
+
+    min_ac = _to_device(min_ac, acs)
+    max_ac = _to_device(max_ac, acs)
+    return (acs * (max_ac - min_ac)) + min_ac
+
+def normalize_states(states, min_state=None, max_state=None, q02=None, q98=None, eps: float = 1e-6):
+    q02 = _to_device(q02, states)
+    q98 = _to_device(q98, states)
+    if q02 is not None and q98 is not None:
+        denom = q98 - q02
+        if torch.any(denom == 0):
+            denom = denom + eps
+        return (states - q02) / denom * 2.0 - 1.0
+
+    min_state = _to_device(min_state, states)
+    max_state = _to_device(max_state, states)
+    return (states - min_state) / (max_state - min_state)
+
+def unnormalize_states(states, min_state=None, max_state=None, q02=None, q98=None):
+    q02 = _to_device(q02, states)
+    q98 = _to_device(q98, states)
+    if q02 is not None and q98 is not None:
+        return ((states + 1.0) / 2.0) * (q98 - q02) + q02
+
+    min_state = _to_device(min_state, states)
+    max_state = _to_device(max_state, states)
+    return (states * (max_state - min_state)) + min_state
 
 class ResidualBlock2(nn.Module):
     def __init__(self, channels):

@@ -91,6 +91,10 @@ def generate_rollout(transition, decoder, data, context_length, horizon, device,
     action_max = stats['action_max'].to(device)
     state_min = stats['state_min'].to(device)
     state_max = stats['state_max'].to(device)
+    action_q02 = stats['action_delta_q02'].to(device) if "action_delta_q02" in stats else None
+    action_q98 = stats['action_delta_q98'].to(device) if "action_delta_q98" in stats else None
+    state_q02 = stats['state_q02'].to(device) if "state_q02" in stats else None
+    state_q98 = stats['state_q98'].to(device) if "state_q98" in stats else None
     
     # Get all ground truth data upfront
     all_data1 = data['cam_zed_embd'][[0]].to(device)
@@ -98,10 +102,14 @@ def generate_rollout(transition, decoder, data, context_length, horizon, device,
     
     # Normalize states and actions
     all_states_raw = data['state'][[0]].to(device)
-    all_states = normalize_states(all_states_raw, state_min, state_max)
+    all_states = normalize_states(
+        all_states_raw, state_min, state_max, q02=state_q02, q98=state_q98
+    )
     
     all_acs = data['action'][[0]].to(device)
-    all_acs = normalize_acs(all_acs, action_min, action_max)
+    all_acs = normalize_acs(
+        all_acs, action_min, action_max, q02=action_q02, q98=action_q98
+    )
     
     # Initialize context with first H frames
     inputs1 = all_data1[:, :H]
@@ -168,7 +176,9 @@ def generate_rollout(transition, decoder, data, context_length, horizon, device,
         inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
         # pred_state is already normalized (model output), so we can use it directly
         inputs_states = torch.cat([inputs_states[[0], 1:], pred_state[:, -1].unsqueeze(1)], dim=1)
-        pred_state_raw = unnormalize_states(pred_state[:, -1], state_min, state_max)
+        pred_state_raw = unnormalize_states(
+            pred_state[:, -1], state_min, state_max, q02=state_q02, q98=state_q98
+        )
         pred_states.append(pred_state_raw.squeeze(0).unsqueeze(0))
     
     # Get ground truth for comparison
@@ -317,8 +327,16 @@ def main():
         'action_min': torch.tensor(stats_data['action_min']).float().to(device),
         'action_max': torch.tensor(stats_data['action_max']).float().to(device),
         'state_min': torch.tensor(stats_data['state_min']).float().to(device),
-        'state_max': torch.tensor(stats_data['state_max']).float().to(device)
+        'state_max': torch.tensor(stats_data['state_max']).float().to(device),
     }
+    if "action_delta_q02" in stats_data:
+        stats["action_delta_q02"] = torch.tensor(stats_data["action_delta_q02"]).float().to(device)
+    if "action_delta_q98" in stats_data:
+        stats["action_delta_q98"] = torch.tensor(stats_data["action_delta_q98"]).float().to(device)
+    if "state_q02" in stats_data:
+        stats["state_q02"] = torch.tensor(stats_data["state_q02"]).float().to(device)
+    if "state_q98" in stats_data:
+        stats["state_q98"] = torch.tensor(stats_data["state_q98"]).float().to(device)
     
     # Infer dimensions from stats
     state_dim = len(stats_data['state_min'])

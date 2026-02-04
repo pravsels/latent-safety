@@ -118,6 +118,14 @@ def main() -> None:
         "state_min": torch.tensor(stats_data["state_min"]).float().to(device),
         "state_max": torch.tensor(stats_data["state_max"]).float().to(device),
     }
+    if "action_delta_q02" in stats_data:
+        stats["action_delta_q02"] = torch.tensor(stats_data["action_delta_q02"]).float().to(device)
+    if "action_delta_q98" in stats_data:
+        stats["action_delta_q98"] = torch.tensor(stats_data["action_delta_q98"]).float().to(device)
+    if "state_q02" in stats_data:
+        stats["state_q02"] = torch.tensor(stats_data["state_q02"]).float().to(device)
+    if "state_q98" in stats_data:
+        stats["state_q98"] = torch.tensor(stats_data["state_q98"]).float().to(device)
     state_dim = len(stats_data["state_min"])
     action_dim = len(stats_data["action_min"])
 
@@ -277,8 +285,20 @@ def main() -> None:
                 st_in = st_buf.unsqueeze(0)
                 ac_in = ac_buf.unsqueeze(0)
 
-                st_in = normalize_states(st_in, stats["state_min"], stats["state_max"])
-                ac_in = normalize_acs(ac_in, stats["action_min"], stats["action_max"])
+                st_in = normalize_states(
+                    st_in,
+                    stats["state_min"],
+                    stats["state_max"],
+                    q02=stats.get("state_q02"),
+                    q98=stats.get("state_q98"),
+                )
+                ac_in = normalize_acs(
+                    ac_in,
+                    stats["action_min"],
+                    stats["action_max"],
+                    q02=stats.get("action_delta_q02"),
+                    q98=stats.get("action_delta_q98"),
+                )
 
                 if use_cuda_timing:
                     ev2.record()

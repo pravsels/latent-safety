@@ -300,6 +300,12 @@ def parse_args(argv=None):
         help="Path to HDF5 file (default: arx5_subset_train.h5). Will be split into train/eval.",
     )
     parser.add_argument(
+        "--action-key",
+        type=str,
+        default="actions_delta",
+        help="Action dataset key to load (default: actions_delta).",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=16,
@@ -562,6 +568,10 @@ def main():
     action_max = torch.tensor(stats['action_max']).float().to(device)
     state_min = torch.tensor(stats['state_min']).float().to(device)
     state_max = torch.tensor(stats['state_max']).float().to(device)
+    action_q02 = torch.tensor(stats['action_delta_q02']).float().to(device) if "action_delta_q02" in stats else None
+    action_q98 = torch.tensor(stats['action_delta_q98']).float().to(device) if "action_delta_q98" in stats else None
+    state_q02 = torch.tensor(stats['state_q02']).float().to(device) if "state_q02" in stats else None
+    state_q98 = torch.tensor(stats['state_q98']).float().to(device) if "state_q98" in stats else None
     
     # Infer dimensions from stats
     state_dim = len(stats['state_min'])
@@ -590,9 +600,27 @@ def main():
     )
     imagine_raw_len = train_raw_len
 
-    expert_data = SplitTrajectoryDataset(hdf5_file, train_raw_len, split='train', num_test=num_test)
-    expert_data_eval = SplitTrajectoryDataset(hdf5_file, train_raw_len, split='test', num_test=num_test)
-    expert_data_imagine = SplitTrajectoryDataset(hdf5_file, imagine_raw_len, split='test', num_test=num_test)
+    expert_data = SplitTrajectoryDataset(
+        hdf5_file,
+        train_raw_len,
+        split='train',
+        num_test=num_test,
+        action_key=args.action_key,
+    )
+    expert_data_eval = SplitTrajectoryDataset(
+        hdf5_file,
+        train_raw_len,
+        split='test',
+        num_test=num_test,
+        action_key=args.action_key,
+    )
+    expert_data_imagine = SplitTrajectoryDataset(
+        hdf5_file,
+        imagine_raw_len,
+        split='test',
+        num_test=num_test,
+        action_key=args.action_key,
+    )
     
     print(f"Dataset: {hdf5_file}")
     print(f"  Train: {num_traj - num_test} trajectories")
@@ -752,12 +780,16 @@ def main():
         target_wrist_embd = gt_wrist_raw[:, target_idx]
 
         gt_state_raw = data['state'].to(device)
-        norm_gt_state_raw = normalize_states(gt_state_raw, state_min, state_max)
+        norm_gt_state_raw = normalize_states(
+            gt_state_raw, state_min, state_max, q02=state_q02, q98=state_q98
+        )
         input_state = norm_gt_state_raw.index_select(1, ctx_idx)
         target_state = norm_gt_state_raw[:, target_idx]
 
         gt_acs_raw = data['action'].to(device)
-        norm_gt_acs_raw = normalize_acs(gt_acs_raw, action_min, action_max)
+        norm_gt_acs_raw = normalize_acs(
+            gt_acs_raw, action_min, action_max, q02=action_q02, q98=action_q98
+        )
         # Build action tokens aligned to each context step start in ctx_idx.
         input_acs = _build_action_tokens_from_raw(norm_gt_acs_raw, ctx_idx, pred_step=pred_step, mode=action_agg)
         future_actions = norm_gt_acs_raw[:, future_slice]
@@ -884,13 +916,17 @@ def main():
                     input_wrist_embd_eval = gt_wrist_embd_eval.index_select(1, ctx_idx)
 
                     all_acs = eval_data['action'][[0]].to(device)
-                    all_acs = normalize_acs(all_acs, action_min, action_max)
+                    all_acs = normalize_acs(
+                        all_acs, action_min, action_max, q02=action_q02, q98=action_q98
+                    )
 
                     # Action tokens aligned to each context step start.
                     acs = _build_action_tokens_from_raw(all_acs, ctx_idx, pred_step=pred_step, mode=action_agg)
 
                     gt_states_eval = eval_data['state'][[0]].to(device)
-                    input_states_eval = normalize_states(gt_states_eval, state_min, state_max).index_select(1, ctx_idx)
+                    input_states_eval = normalize_states(
+                        gt_states_eval, state_min, state_max, q02=state_q02, q98=state_q98
+                    ).index_select(1, ctx_idx)
                     future_actions = all_acs[:, t:t + future_len]
                     pred_front, pred_wrist, pred_state, _ = transition(
                         input_front_embd_eval,
@@ -902,7 +938,13 @@ def main():
 
                     target_front = gt_front_embd_eval[[0], target_idx]
                     target_wrist = gt_wrist_embd_eval[[0], target_idx]
-                    target_state = normalize_states(gt_states_eval[[0], target_idx], state_min, state_max)
+                    target_state = normalize_states(
+                        gt_states_eval[[0], target_idx],
+                        state_min,
+                        state_max,
+                        q02=state_q02,
+                        q98=state_q98,
+                    )
 
                     l_front = nn.MSELoss()(pred_front[:, -1], target_front).item()
                     l_wrist = nn.MSELoss()(pred_wrist[:, -1], target_wrist).item()

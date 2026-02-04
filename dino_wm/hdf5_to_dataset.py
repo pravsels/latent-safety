@@ -19,6 +19,7 @@ from torchvision import transforms
 import torchvision.transforms.functional as F
 from tqdm import tqdm
 from dino_wm.config import MODEL_CONFIG, get_dino_config
+from dino_wm.data_utils import compute_action_deltas
 
 # Image transforms
 
@@ -198,10 +199,20 @@ def convert_hdf5_to_consolidated_hdf5(hdf5_dir: str, output_hdf5_file: str):
                                 # Resize camera images
                                 data = resize_images_to_224(data, key)
                             group.create_dataset(key, data=data)
+                        if "actions_delta" not in data_group and "actions" in data_group and "states" in data_group:
+                            actions = data_group["actions"][...]
+                            states = data_group["states"][...]
+                            actions_delta = compute_action_deltas(actions, states)
+                            group.create_dataset("actions_delta", data=actions_delta)
                     else:
                         # Fallback if not nested under "data"
                         for key in hf_in.keys():
                             hf_in.copy(hf_in[key], group)
+                        if "actions_delta" not in hf_in and "actions" in hf_in and "states" in hf_in:
+                            actions = hf_in["actions"][...]
+                            states = hf_in["states"][...]
+                            actions_delta = compute_action_deltas(actions, states)
+                            group.create_dataset("actions_delta", data=actions_delta)
 
                 print(f"Copied {hdf5_file} → trajectory_{i}")
 

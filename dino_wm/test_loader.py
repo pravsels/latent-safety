@@ -6,7 +6,16 @@ from torch.utils.data import Dataset, DataLoader
 import h5py
 
 class SplitTrajectoryDataset(Dataset):
-    def __init__(self, hdf5_file, segment_length, split='train', num_test=100, seed: int = 0, stride: int = 1):
+    def __init__(
+        self,
+        hdf5_file,
+        segment_length,
+        split='train',
+        num_test=100,
+        seed: int = 0,
+        stride: int = 1,
+        action_key: str = "actions_delta",
+    ):
         """
         HDF5 trajectory dataset that returns fixed-length segments.
         
@@ -29,6 +38,8 @@ class SplitTrajectoryDataset(Dataset):
         if self.stride <= 0:
             raise ValueError(f"stride must be > 0. Got {self.stride}")
         self._hf = None  # lazily opened per worker/process
+        self.action_key = action_key
+        self._missing_action_key_warned = False
         
         # Open HDF5 file to get a list of trajectory groups
         with h5py.File(self.hdf5_file, 'r') as hf:
@@ -51,7 +62,8 @@ class SplitTrajectoryDataset(Dataset):
         with h5py.File(self.hdf5_file, 'r') as hf:
             for traj_id in self.trajectory_ids:
                 trajectory = hf[traj_id]
-                traj_len = int(trajectory['actions'].shape[0])
+                action_key = self._select_action_key(trajectory)
+                traj_len = int(trajectory[action_key].shape[0])
                 max_start = traj_len - self.segment_length
                 if max_start < 0:
                     num_slices = 0
@@ -105,7 +117,8 @@ class SplitTrajectoryDataset(Dataset):
         segment_obs_tensor["cam_rs_embd"] = torch.tensor(trajectory["cam_rs_embd"][start_idx:end_idx], dtype=torch.float32)
         segment_obs_tensor["cam_zed_embd"] = torch.tensor(trajectory["cam_zed_embd"][start_idx:end_idx], dtype=torch.float32)
         segment_obs_tensor["state"] = torch.tensor(trajectory["states"][start_idx:end_idx], dtype=torch.float32)
-        segment_obs_tensor["action"] = torch.tensor(trajectory["actions"][start_idx:end_idx], dtype=torch.float32)
+        action_key = self._select_action_key(trajectory)
+        segment_obs_tensor["action"] = torch.tensor(trajectory[action_key][start_idx:end_idx], dtype=torch.float32)
         segment_obs_tensor["traj_id"] = traj_id
         segment_obs_tensor["start_idx"] = start_idx
         if "labels" in trajectory.keys():
@@ -116,6 +129,16 @@ class SplitTrajectoryDataset(Dataset):
         segment_obs_tensor["is_terminal"] = segment_obs_tensor["is_last"]
         segment_obs_tensor["discount"] = torch.ones(self.segment_length, dtype=torch.float32)
         return segment_obs_tensor
+
+    def _select_action_key(self, trajectory):
+        if self.action_key in trajectory:
+            return self.action_key
+        if not self._missing_action_key_warned:
+            print(
+                f"⚠️ Warning: '{self.action_key}' missing in trajectory; falling back to 'actions'."
+            )
+            self._missing_action_key_warned = True
+        return "actions"
     
 if __name__ == '__main__':
     # Path to your HDF5 file

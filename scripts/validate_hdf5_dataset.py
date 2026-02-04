@@ -31,11 +31,13 @@ def validate_trajectory(
     
     # Check required datasets
     required_datasets = ["camera_0", "camera_1", "actions", "cam_rs_embd", "cam_zed_embd"]
-    optional_datasets = ["states"]
+    optional_datasets = ["states", "actions_delta"]
     
     for ds_name in required_datasets:
         if ds_name not in grp:
             errors.append(f"Missing required dataset: {ds_name}")
+    if "states" in grp and "actions_delta" not in grp:
+        errors.append("Missing required dataset: actions_delta")
     
     # Check required attributes
     required_attrs = ["dataset_id", "original_episode_index"]
@@ -74,6 +76,13 @@ def validate_trajectory(
             num_states = states.shape[0]
             if num_states != num_frames_cam0:
                 errors.append(f"States length mismatch: {num_states} vs {num_frames_cam0}")
+        if "actions_delta" in grp:
+            actions_delta = grp["actions_delta"]
+            num_actions_delta = actions_delta.shape[0]
+            if num_actions_delta != num_actions:
+                errors.append(
+                    f"actions_delta length mismatch: {num_actions_delta} vs {num_actions}"
+                )
         
         # Validate image shapes (should be HWC format)
         if len(camera_0.shape) != 4:
