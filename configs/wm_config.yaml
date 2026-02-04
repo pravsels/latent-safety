@@ -17,10 +17,11 @@ sequence_length: 4
 pred_step: 1
 # Number of future raw-frame actions to condition on.
 action_horizon: 100
+future_action_max_steps: 50
+future_action_small_max_steps: 20
+future_action_small_prob: 0.8
 eval_horizon: 16
 context_length: 3
-# How to form one action token per model-step interval when pred_step > 1.
-action_aggregation: sum
 eval_interval: 1000
 eval_samples: 8
 save_every: 1000
