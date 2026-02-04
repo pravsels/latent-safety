@@ -22,6 +22,7 @@ import h5py
 import numpy as np
 import torch
 from tqdm import tqdm
+import packaging.version
 from datasets import load_dataset
 
 # Import shared utilities
@@ -31,7 +32,9 @@ try:
 except ImportError:
     from utils import get_dino_model, preprocess_images_for_dino, to_hwc_uint8
     import utils
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+from lerobot.datasets.backward_compatibility import BackwardCompatibilityError
+from robocandywrapper.dataformats.lerobot_21 import LeRobot21DatasetMetadata
 try:
     from robocandywrapper import make_dataset_without_config
 except ImportError:
@@ -404,6 +407,19 @@ def process_wrapped_dataset(
         )
     return start_traj_idx
 
+
+def get_camera_keys(repo_id: str) -> set[str]:
+    try:
+        meta = LeRobotDatasetMetadata(repo_id)
+        version = getattr(meta, "codebase_version", None)
+        if version is None and hasattr(meta, "info"):
+            version = meta.info.get("codebase_version")
+        if version is None or packaging.version.parse(str(version)) < packaging.version.parse("3.0"):
+            meta = LeRobot21DatasetMetadata(repo_id)
+    except (BackwardCompatibilityError, NotImplementedError, FileNotFoundError, ValueError):
+        meta = LeRobot21DatasetMetadata(repo_id)
+    return set(getattr(meta, "camera_keys", []))
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--datasets-list", type=str, required=True)
@@ -499,14 +515,16 @@ def main():
                     print("⚠️ Low disk space! Stopping.")
                 else:
                     print(f"🍬 Validating RoboCandyWrapper datasets for required keys...")
-                    required_keys = {"observation.images.front", "observation.images.wrist"}
+                    required_front_tokens = ("front",)
+                    required_wrist_tokens = ("wrist", "eye_in_hand")
                     valid_repo_ids = []
                     skipped_repo_ids = []
                     for repo_id in dataset_ids:
                         try:
-                            probe = load_dataset(repo_id, split="train")
-                            feature_keys = set(getattr(probe, "features", {}).keys())
-                            if required_keys.issubset(feature_keys):
+                            camera_keys = get_camera_keys(repo_id)
+                            has_front = any(any(tok in k for tok in required_front_tokens) for k in camera_keys)
+                            has_wrist = any(any(tok in k for tok in required_wrist_tokens) for k in camera_keys)
+                            if has_front and has_wrist:
                                 valid_repo_ids.append(repo_id)
                             else:
                                 skipped_repo_ids.append(repo_id)
@@ -515,8 +533,13 @@ def main():
                             print(f"⚠️ Skipping {repo_id}: {e}")
                     if skipped_repo_ids:
                         print(f"⚠️ Skipping {len(skipped_repo_ids)} repos missing required keys.")
+                    if not valid_repo_ids:
+                        print("❌ No repos matched required camera keys. Aborting.")
+                        return
                     print(f"🍬 Loading RoboCandyWrapper dataset for {len(valid_repo_ids)} repos...")
-                    wrapped_dataset = make_dataset_without_config(valid_repo_ids)
+                    wrapped_dataset = make_dataset_without_config(
+                        valid_repo_ids, use_imagenet_stats=False
+                    )
                     traj_counter = process_wrapped_dataset(
                         wrapped_dataset=wrapped_dataset,
                         hdf_file=hf_out,
