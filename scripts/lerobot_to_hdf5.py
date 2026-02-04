@@ -31,6 +31,10 @@ except ImportError:
     from utils import get_dino_model, preprocess_images_for_dino, to_hwc_uint8
     import utils
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+try:
+    from robocandywrapper import make_dataset_without_config
+except ImportError:
+    make_dataset_without_config = None
 from dino_wm.data_utils import write_actions_delta
 
 # Global flag for graceful shutdown
@@ -48,7 +52,7 @@ def signal_handler(signum, frame):
 # --- Worker Process ---
 
 def data_generator(
-    dataset_id: str,
+    dataset,
     episode_indices: List[int],
     min_length: int,
     batch_size: int
@@ -57,8 +61,6 @@ def data_generator(
     Generator that yields (ep_idx, data_dict) or (ep_idx, None) sequentially.
     """
     try:
-        dataset = LeRobotDataset(dataset_id, video_backend="pyav")
-        
         for ep_idx in episode_indices:
             if SHUTDOWN_REQUESTED:
                 break
@@ -87,8 +89,8 @@ def data_generator(
                 yield (ep_idx, str(e))
                 
     except Exception as e:
-        print(f"❌ Dataset Init Error: {e}")
-        yield (-1, f"Dataset Init Error: {e}")
+        print(f"❌ Dataset Error: {e}")
+        yield (-1, f"Dataset Error: {e}")
 
 # --- Main Process ---
 
@@ -119,7 +121,8 @@ def get_next_trajectory_index(hdf_file: h5py.File) -> int:
                 pass
     return max_idx + 1
 
-def process_dataset(
+def process_dataset_object(
+    dataset,
     dataset_id: str,
     hdf_file: h5py.File,
     dino_model: torch.nn.Module,
@@ -132,13 +135,18 @@ def process_dataset(
 ) -> int:
     
     print(f"\nLoading dataset metadata: {dataset_id}")
-    try:
-        dataset = LeRobotDataset(dataset_id, video_backend="pyav")
-    except Exception as e:
-        print(f"❌ Failed to init dataset {dataset_id}: {e}")
+    required_attrs = ["episode_data_index", "hf_dataset", "meta", "_query_videos"]
+    missing_attrs = [attr for attr in required_attrs if not hasattr(dataset, attr)]
+    if missing_attrs:
+        print(
+            f"❌ Dataset missing required attributes {missing_attrs}. "
+            "RoboCandyWrapper dataset must be LeRobot-compatible."
+        )
         return start_traj_idx
 
-    num_episodes = dataset.num_episodes
+    num_episodes = getattr(dataset, "num_episodes", None)
+    if num_episodes is None:
+        num_episodes = int(len(dataset.episode_data_index["from"]))
     if max_episodes is not None:
         num_episodes = min(num_episodes, max_episodes)
     
@@ -160,7 +168,7 @@ def process_dataset(
     pbar = tqdm(total=len(episodes_to_process), desc=f"Encoding {dataset_id}", ncols=80)
     
     # Create generator
-    data_iter = data_generator(dataset_id, episodes_to_process, min_length, batch_size)
+    data_iter = data_generator(dataset, episodes_to_process, min_length, batch_size)
     
     trajectories_saved = 0
     
@@ -415,28 +423,54 @@ def main():
             traj_counter = get_next_trajectory_index(hf_out)
             print(f"📊 Starting from trajectory index: {traj_counter}")
         
-        for ds_id in dataset_ids:
+        if make_dataset_without_config is None:
+            print("❌ RoboCandyWrapper not installed. Falling back to LeRobotDataset per dataset.")
+            for ds_id in dataset_ids:
+                if SHUTDOWN_REQUESTED:
+                    print("\n🛑 Shutdown complete. File has been properly closed.")
+                    break
+                    
+                # Check disk space
+                usage = shutil.disk_usage(output_path.parent)
+                if usage.free < 2 * 1024**3: # 2GB
+                    print("⚠️ Low disk space! Stopping.")
+                    break
+                    
+                traj_counter = process_dataset_object(
+                    dataset=LeRobotDataset(ds_id, video_backend="pyav"),
+                    dataset_id=ds_id,
+                    hdf_file=hf_out,
+                    dino_model=dino_model,
+                    device=device,
+                    batch_size=args.batch_size,
+                    max_episodes=args.max_episodes_per_dataset,
+                    start_traj_idx=traj_counter,
+                    min_length=2,
+                    resume=(mode == "a")
+                )
+        else:
             if SHUTDOWN_REQUESTED:
                 print("\n🛑 Shutdown complete. File has been properly closed.")
-                break
-                
-            # Check disk space
-            usage = shutil.disk_usage(output_path.parent)
-            if usage.free < 2 * 1024**3: # 2GB
-                print("⚠️ Low disk space! Stopping.")
-                break
-                
-            traj_counter = process_dataset(
-                dataset_id=ds_id,
-                hdf_file=hf_out,
-                dino_model=dino_model,
-                device=device,
-                batch_size=args.batch_size,
-                max_episodes=args.max_episodes_per_dataset,
-                start_traj_idx=traj_counter,
-                min_length=2,
-                resume=(mode == "a")
-            )
+            else:
+                # Check disk space
+                usage = shutil.disk_usage(output_path.parent)
+                if usage.free < 2 * 1024**3: # 2GB
+                    print("⚠️ Low disk space! Stopping.")
+                else:
+                    print(f"🍬 Loading RoboCandyWrapper dataset for {len(dataset_ids)} repos...")
+                    dataset = make_dataset_without_config(dataset_ids)
+                    traj_counter = process_dataset_object(
+                        dataset=dataset,
+                        dataset_id="mixed",
+                        hdf_file=hf_out,
+                        dino_model=dino_model,
+                        device=device,
+                        batch_size=args.batch_size,
+                        max_episodes=args.max_episodes_per_dataset,
+                        start_traj_idx=traj_counter,
+                        min_length=2,
+                        resume=(mode == "a")
+                    )
         
         # Final flush
         hf_out.flush()
