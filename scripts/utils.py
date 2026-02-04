@@ -12,18 +12,26 @@ import lerobot.datasets.lerobot_dataset
 
 def safe_hf_transform_to_torch(items_dict: dict) -> dict:
     for key in items_dict:
-        first_item = items_dict[key][0]
+        values = items_dict[key]
+        if hasattr(values, "to_pylist"):
+            values = values.to_pylist()
+        elif not isinstance(values, (list, tuple)):
+            values = list(values)
+        if not values:
+            items_dict[key] = values
+            continue
+        first_item = values[0]
         if isinstance(first_item, Image.Image):
             to_tensor = transforms.ToTensor()
-            items_dict[key] = [to_tensor(img) for img in items_dict[key]]
+            items_dict[key] = [to_tensor(img) for img in values]
         elif first_item is None:
-            pass
+            items_dict[key] = values
         elif isinstance(first_item, (list, tuple, np.ndarray)) and len(first_item) > 0 and isinstance(first_item[0], str):
             # Skip conversion for list of strings
-            pass
+            items_dict[key] = values
         else:
             # Convert everything else to tensors, skipping individual strings
-            items_dict[key] = [x if isinstance(x, str) else torch.tensor(x) for x in items_dict[key]]
+            items_dict[key] = [x if isinstance(x, str) else torch.tensor(x) for x in values]
     return items_dict
 
 lerobot.datasets.lerobot_dataset.hf_transform_to_torch = safe_hf_transform_to_torch
