@@ -12,12 +12,12 @@ module purge
 module load brics/apptainer-multi-node
 
 # Paths
-home_dir="/home/u5dm/pravsels.u5dm"
+home_dir="/home/u6cr/pravsels.u6cr"
 repo_dir="${home_dir}/latent_safety"
-scratch_dir="/scratch/u5dm/pravsels.u5dm/latent_safety"
+scratch_dir="/scratch/u6cr/pravsels.u6cr/latent_safety"
 container="${scratch_dir}/container/latent_safety_arm64.sif"
-HF_CACHE="/scratch/u5dm/pravsels.u5dm/huggingface_cache"
-SCRATCH_WEIGHTS="/scratch/u5dm/pravsels.u5dm/latent_safety/weights"
+HF_CACHE="/scratch/u6cr/pravsels.u6cr/huggingface_cache"
+SCRATCH_WEIGHTS="/scratch/u6cr/pravsels.u6cr/latent_safety/weights"
 
 # Input/Output config
 DATASETS_LIST="${repo_dir}/arx5_datasets_new.json"

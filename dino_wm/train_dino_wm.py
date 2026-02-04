@@ -161,7 +161,65 @@ def _build_action_tokens_from_raw(
     raise ValueError(f"Unknown action aggregation mode '{mode}'")
 
 
-def main():
+def compute_action_horizon_indices(
+    *,
+    context_length: int,
+    pred_step: int,
+    action_horizon: int,
+    device: str | torch.device | None = None,
+) -> tuple[torch.Tensor, slice, int, int]:
+    if context_length < 1:
+        raise ValueError(f"context_length must be >= 1 (got {context_length})")
+    if pred_step < 1:
+        raise ValueError(f"pred_step must be >= 1 (got {pred_step})")
+    if action_horizon < 1:
+        raise ValueError(f"action_horizon must be >= 1 (got {action_horizon})")
+    ctx_idx = torch.arange(context_length, device=device, dtype=torch.long) * pred_step
+    t = int(ctx_idx[-1].item())
+    future_slice = slice(t, t + action_horizon)
+    target_idx = t + action_horizon
+    segment_length = target_idx + 1
+    return ctx_idx, future_slice, target_idx, segment_length
+
+
+def compute_action_horizon_ar_indices(
+    *,
+    context_length: int,
+    pred_step: int,
+    action_horizon: int,
+    device: str | torch.device | None = None,
+) -> tuple[torch.Tensor, slice, int, slice, int, int]:
+    ctx_idx, future_slice, target_idx, _ = compute_action_horizon_indices(
+        context_length=context_length,
+        pred_step=pred_step,
+        action_horizon=action_horizon,
+        device=device,
+    )
+    ar_future_slice = slice(future_slice.start + 1, future_slice.stop + 1)
+    ar_target_idx = target_idx + 1
+    segment_length = ar_target_idx + 1
+    return ctx_idx, future_slice, target_idx, ar_future_slice, ar_target_idx, segment_length
+
+
+def compute_eval_t_plus_k_indices(
+    *,
+    context_length: int,
+    pred_step: int,
+    action_horizon: int,
+    device: str | torch.device | None = None,
+) -> tuple[torch.Tensor, int, int]:
+    ctx_idx, _, target_idx, segment_length = compute_action_horizon_indices(
+        context_length=context_length,
+        pred_step=pred_step,
+        action_horizon=action_horizon,
+        device=device,
+    )
+    return ctx_idx, target_idx, segment_length
+
+
+def parse_args(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
     # Parse config path first so we can apply YAML values as argparse defaults.
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument(
@@ -170,12 +228,12 @@ def main():
         default=os.path.join("configs", "wm_config.yaml"),
         help="Path to YAML config file (default: configs/wm_config.yaml). CLI flags override it.",
     )
-    pre_args, remaining_argv = pre_parser.parse_known_args()
+    pre_args, remaining_argv = pre_parser.parse_known_args(argv)
     cfg = _load_yaml_config(pre_args.config)
 
     parser = argparse.ArgumentParser(
         description="Train DINO World Model on trajectory data",
-        parents=[pre_parser]
+        parents=[pre_parser],
     )
     parser.add_argument(
         "--hdf5-file",
@@ -239,6 +297,12 @@ def main():
         type=int,
         default=1,
         help="Prediction step in raw dataset frames. pred_step=5 means train/eval on t->t+5 (default: 1).",
+    )
+    parser.add_argument(
+        "--action-horizon",
+        type=int,
+        default=100,
+        help="Number of future raw-frame actions to condition on (default: 100).",
     )
     parser.add_argument(
         "--action-aggregation",
@@ -359,7 +423,11 @@ def main():
         if k in known_dests:
             parser.set_defaults(**{k: v})
 
-    args = parser.parse_args(remaining_argv)
+    return parser.parse_args(remaining_argv)
+
+
+def main():
+    args = parse_args()
 
     # Initialize wandb
     wandb.init(
@@ -385,6 +453,7 @@ def main():
     H = args.context_length
     pred_step = int(args.pred_step)
     action_agg = str(args.action_aggregation)
+    action_horizon = int(args.action_horizon)
     device = args.device
 
     if BL < 2:
@@ -396,11 +465,8 @@ def main():
     if EVAL_H < H:
         raise ValueError(f"--eval-horizon must be >= --context-length (got eval_horizon={EVAL_H}, context_length={H}).")
     
-    # VideoTransformer is initialized with num_frames = BL-1; attention mask/temp embeddings support num_frames <= (BL-1).
-    if H > (BL - 1):
-        raise ValueError(
-            f"--context-length must be <= (--sequence-length - 1) (got context_length={H}, sequence_length={BL})."
-        )
+    if action_horizon < 1:
+        raise ValueError(f"--action-horizon must be >= 1 (got {action_horizon}).")
     if int(args.eval_samples) < 1:
         raise ValueError(f"--eval-samples must be >= 1 (got {args.eval_samples}).")
     if pred_step < 1:
@@ -448,10 +514,14 @@ def main():
     if num_traj - num_test < 1 and num_traj > 1:
         num_test = num_traj - 1
     
-    # We load contiguous raw-frame segments, then later index into them using pred_step.
-    train_raw_len = 1 + pred_step * (BL - 1)
-    # Eval rollout uses H context frames and (EVAL_H-H) predicted steps, all on the pred_step grid.
-    imagine_raw_len = 1 + (EVAL_H - 1) * pred_step
+    # We load contiguous raw-frame segments, then later index into them using pred_step and action_horizon.
+    _, _, _, _, _, train_raw_len = compute_action_horizon_ar_indices(
+        context_length=H,
+        pred_step=pred_step,
+        action_horizon=action_horizon,
+        device="cpu",
+    )
+    imagine_raw_len = train_raw_len
 
     expert_data = SplitTrajectoryDataset(hdf5_file, train_raw_len, split='train', num_test=num_test)
     expert_data_eval = SplitTrajectoryDataset(hdf5_file, train_raw_len, split='test', num_test=num_test)
@@ -483,7 +553,8 @@ def main():
     transition = VideoTransformer(
         state_dim=state_dim,    # Inferred from dataset stats
         action_dim=action_dim,  # Inferred from dataset stats
-        num_frames=BL-1,        # context window size (input sequence length)
+        num_frames=H,           # context window size
+        action_horizon=action_horizon,
         dino_version=args.dino_version,
         **MODEL_CONFIG
     ).to(device)
@@ -571,75 +642,82 @@ def main():
 
         data = next(expert_loader)
 
-        # Teacher forcing uses a pred_step-spaced grid from a contiguous raw segment.
-        # This means "next step" is t -> t+pred_step in raw frame indices.
-        # Example (BL=4, pred_step=5): raw indices [0, 5, 10, 15]
-        # Multiply by pred_step to convert step indices [0..BL-1] into raw-frame indices
-        # [0, pred_step, 2*pred_step, ..., (BL-1)*pred_step].
-        idx = torch.arange(BL, device=device, dtype=torch.long) * pred_step  # (BL,)
+        ctx_idx, future_slice, target_idx, ar_future_slice, ar_target_idx, _ = compute_action_horizon_ar_indices(
+            context_length=H,
+            pred_step=pred_step,
+            action_horizon=action_horizon,
+            device=device,
+        )
 
         gt_front_raw = data['cam_zed_embd'].to(device)
-        gt_front_embd = gt_front_raw.index_select(1, idx)
-        input_front_embd = gt_front_embd[:, :-1]
-        target_front_embd = gt_front_embd[:, 1:]
+        input_front_embd = gt_front_raw.index_select(1, ctx_idx)
+        target_front_embd = gt_front_raw[:, target_idx]
 
         gt_wrist_raw = data['cam_rs_embd'].to(device)
-        gt_wrist_embd = gt_wrist_raw.index_select(1, idx)
-        input_wrist_embd = gt_wrist_embd[:, :-1]
-        target_wrist_embd = gt_wrist_embd[:, 1:]
+        input_wrist_embd = gt_wrist_raw.index_select(1, ctx_idx)
+        target_wrist_embd = gt_wrist_raw[:, target_idx]
 
         gt_state_raw = data['state'].to(device)
         norm_gt_state_raw = normalize_states(gt_state_raw, state_min, state_max)
-        norm_gt_state = norm_gt_state_raw.index_select(1, idx)
-        input_state = norm_gt_state[:, :-1]
-        target_state = norm_gt_state[:, 1:]
+        input_state = norm_gt_state_raw.index_select(1, ctx_idx)
+        target_state = norm_gt_state_raw[:, target_idx]
 
         gt_acs_raw = data['action'].to(device)
         norm_gt_acs_raw = normalize_acs(gt_acs_raw, action_min, action_max)
-        # Build action tokens aligned to each step start in idx, then drop the last (no action after final frame).
-        norm_gt_acs = _build_action_tokens_from_raw(norm_gt_acs_raw, idx, pred_step=pred_step, mode=action_agg)
-        input_acs = norm_gt_acs[:, :-1]
+        # Build action tokens aligned to each context step start in ctx_idx.
+        input_acs = _build_action_tokens_from_raw(norm_gt_acs_raw, ctx_idx, pred_step=pred_step, mode=action_agg)
+        future_actions = norm_gt_acs_raw[:, future_slice]
 
         optimizer.zero_grad()
 
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            pred_front, pred_wrist, pred_state, _ = transition(input_front_embd, input_wrist_embd, input_state, input_acs)
-            loss_front_tf = nn.MSELoss()(pred_front, target_front_embd)
-            loss_wrist_tf = nn.MSELoss()(pred_wrist, target_wrist_embd)
-            loss_state_tf = nn.MSELoss()(pred_state, target_state)
+            pred_front, pred_wrist, pred_state, _ = transition(
+                input_front_embd,
+                input_wrist_embd,
+                input_state,
+                input_acs,
+                future_actions,
+            )
+            loss_front_tf = nn.MSELoss()(pred_front[:, -1], target_front_embd)
+            loss_wrist_tf = nn.MSELoss()(pred_wrist[:, -1], target_wrist_embd)
+            loss_state_tf = nn.MSELoss()(pred_state[:, -1], target_state)
             loss_tf = loss_front_tf + loss_wrist_tf + loss_state_tf
 
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            # Optional 2-step AR loss (requires at least 3 steps total: step0 -> step1 -> step2).
-            if BL >= 3:
-                # Detach predictions for AR step
-                detach_pred_front = pred_front
-                detach_pred_wrist = pred_wrist
-                detach_pred_state = pred_state.detach()
-
-                # Create hybrid AR inputs: [GT_step0, Pred_step1] on the pred_step grid.
-                input_front_ar = torch.cat([gt_front_embd[:, [0]], detach_pred_front[:, [0]]], dim=1)
-                input_wrist_ar = torch.cat([gt_wrist_embd[:, [0]], detach_pred_wrist[:, [0]]], dim=1)
-                input_state_ar = torch.cat([norm_gt_state[:, [0]], detach_pred_state[:, [0]]], dim=1)
-                input_acs_ar = norm_gt_acs[:, [0, 1]]
-
-                # AR Forward pass
-                pred_front_ar, pred_wrist_ar, pred_state_ar, _ = transition(
-                    input_front_ar, input_wrist_ar, input_state_ar, input_acs_ar
-                )
-
-                # Targets for AR step: step 2 on the pred_step grid (raw index = 2*pred_step).
-                target_front_ar = gt_front_embd[:, 2]
-                target_wrist_ar = gt_wrist_embd[:, 2]
-                target_state_ar = norm_gt_state[:, 2]
-
-                # Calculate AR losses on the second step of prediction (corresponding to step 2)
-                loss_front_ar = nn.MSELoss()(pred_front_ar[:, 1], target_front_ar)
-                loss_wrist_ar = nn.MSELoss()(pred_wrist_ar[:, 1], target_wrist_ar)
-                loss_state_ar = nn.MSELoss()(pred_state_ar[:, 1], target_state_ar)
-                loss_ar = loss_front_ar + loss_wrist_ar + loss_state_ar
-            else:
-                loss_ar = torch.zeros([], device=device, dtype=torch.float32)
+            input_front_ar = torch.cat(
+                [input_front_embd[:, 1:], pred_front[:, -1].unsqueeze(1)],
+                dim=1,
+            )
+            input_wrist_ar = torch.cat(
+                [input_wrist_embd[:, 1:], pred_wrist[:, -1].unsqueeze(1)],
+                dim=1,
+            )
+            input_state_ar = torch.cat(
+                [input_state[:, 1:], pred_state[:, -1].unsqueeze(1)],
+                dim=1,
+            )
+            ctx_idx_ar = torch.cat([ctx_idx[1:], torch.tensor([target_idx], device=device)])
+            input_acs_ar = _build_action_tokens_from_raw(
+                norm_gt_acs_raw,
+                ctx_idx_ar,
+                pred_step=pred_step,
+                mode=action_agg,
+            )
+            future_actions_ar = norm_gt_acs_raw[:, ar_future_slice]
+            pred_front_ar, pred_wrist_ar, pred_state_ar, _ = transition(
+                input_front_ar,
+                input_wrist_ar,
+                input_state_ar,
+                input_acs_ar,
+                future_actions_ar,
+            )
+            target_front_ar = gt_front_raw[:, ar_target_idx]
+            target_wrist_ar = gt_wrist_raw[:, ar_target_idx]
+            target_state_ar = norm_gt_state_raw[:, ar_target_idx]
+            loss_front_ar = nn.MSELoss()(pred_front_ar[:, -1], target_front_ar)
+            loss_wrist_ar = nn.MSELoss()(pred_wrist_ar[:, -1], target_wrist_ar)
+            loss_state_ar = nn.MSELoss()(pred_state_ar[:, -1], target_state_ar)
+            loss_ar = loss_front_ar + loss_wrist_ar + loss_state_ar
 
         loss = loss_tf + loss_ar * 0.5
 
@@ -676,8 +754,6 @@ def main():
             iters.append(i)
             transition.eval()
 
-            eval_specimens = []
-
             # Metrics to average
             avg_metrics = {
                 'eval_loss': 0.0,
@@ -690,14 +766,18 @@ def main():
 
             print(f"\nRunning evaluation on {num_samples} samples...")
 
+            sample_images = None
             for s_idx in range(num_samples):
                 with torch.no_grad():
-                    # Get sample for rollout (long sequence)
+                    # Get sample for single-step t+K evaluation
                     eval_data = next(expert_loader_imagine)
                     gt_front_embd_eval = eval_data['cam_zed_embd'].to(device)
-                    # Context raw-frame indices on the pred_step grid: [0, pred_step, 2*pred_step, ..., (H-1)*pred_step]
-                    ctx_idx = torch.arange(H, device=device, dtype=torch.long) * pred_step  # (H,)
-                    t0 = int(ctx_idx[-1].item())  # raw index of last context step
+                    ctx_idx, target_idx, _ = compute_eval_t_plus_k_indices(
+                        context_length=H,
+                        pred_step=pred_step,
+                        action_horizon=action_horizon,
+                        device=device,
+                    )
                     input_front_embd_eval = gt_front_embd_eval.index_select(1, ctx_idx)
 
                     gt_wrist_embd_eval = eval_data['cam_rs_embd'].to(device)
@@ -711,122 +791,57 @@ def main():
 
                     gt_states_eval = eval_data['state'][[0]].to(device)
                     input_states_eval = normalize_states(gt_states_eval, state_min, state_max).index_select(1, ctx_idx)
-
-                    # Original images for comparison and video
-                    # Resize to DECODER_CONFIG['decoder_image_size']
-                    im1s = eval_data['agentview_image'][[0]].to(device).index_select(1, ctx_idx).squeeze(0) / 255.
-                    im2s = eval_data['robot0_eye_in_hand_image'][[0]].to(device).index_select(1, ctx_idx).squeeze(0) / 255.
-                    im1s = F.interpolate(im1s.permute(0, 3, 1, 2), size=DECODER_CONFIG['decoder_image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-                    im2s = F.interpolate(im2s.permute(0, 3, 1, 2), size=DECODER_CONFIG['decoder_image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-
-                    # Rollout
-                    rollout_latent_mse = 0
-                    rollout_steps = int(EVAL_H - H)
-                    for k in range(rollout_steps):
-                        pred_front, pred_wrist, pred_state, _ = transition(input_front_embd_eval, input_wrist_embd_eval, input_states_eval, acs)
-
-                        # Track rollout error (latent MSE)
-                        t_next = t0 + (k + 1) * pred_step
-                        target_front = gt_front_embd_eval[[0], t_next]
-                        target_wrist = gt_wrist_embd_eval[[0], t_next]
-                        rollout_latent_mse += nn.MSELoss()(pred_front[:, [-1]], target_front.unsqueeze(1)).item()
-                        rollout_latent_mse += nn.MSELoss()(pred_wrist[:, [-1]], target_wrist.unsqueeze(1)).item()
-
-                        pred_latent = torch.cat([pred_front[:, [-1]], pred_wrist[:, [-1]]], dim=0)
-                        pred_ims, _ = decoder(pred_latent)
-                        pred_ims = rearrange(pred_ims, "(b t) c h w -> b t h w c", t=1)
-                        pred_im1, pred_im2 = torch.split(pred_ims, [input_front_embd_eval.shape[0], input_wrist_embd_eval.shape[0]], dim=0)
-
-                        im1s = torch.cat([im1s, pred_im1.squeeze(0)], dim=0)
-                        im2s = torch.cat([im2s, pred_im2.squeeze(0)], dim=0)
-
-                        # Get next inputs
-                        next_ac = _build_action_tokens_from_raw(
-                            all_acs,
-                            torch.tensor([t_next], device=device, dtype=torch.long),
-                            pred_step=pred_step,
-                            mode=action_agg,
-                        )  # (1, 1, A)
-                        acs = torch.cat([acs[:, 1:], next_ac], dim=1)
-                        input_front_embd_eval = torch.cat([input_front_embd_eval[[0], 1:], pred_front[:, -1].unsqueeze(1)], dim=1)
-                        input_wrist_embd_eval = torch.cat([input_wrist_embd_eval[[0], 1:], pred_wrist[:, -1].unsqueeze(1)], dim=1)
-                        input_states_eval = torch.cat([input_states_eval[[0], 1:], pred_state[:, -1].unsqueeze(1)], dim=1)
-
-                    if rollout_steps > 0:
-                        rollout_latent_mse /= rollout_steps
-
-                    # Video prep
-                    # Align GT video frames to the same pred_step grid as the rollout:
-                    # indices [0, pred_step, 2*pred_step, ..., (EVAL_H-1)*pred_step]
-                    vid_idx = torch.arange(EVAL_H, device=device, dtype=torch.long) * pred_step
-                    gt_im1 = eval_data['agentview_image'][[0]].to(device).index_select(1, vid_idx).squeeze(0)
-                    gt_im2 = eval_data['robot0_eye_in_hand_image'][[0]].to(device).index_select(1, vid_idx).squeeze(0)
-                    gt_im1 = F.interpolate(gt_im1.permute(0, 3, 1, 2).float(), size=DECODER_CONFIG['decoder_image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-                    gt_im2 = F.interpolate(gt_im2.permute(0, 3, 1, 2).float(), size=DECODER_CONFIG['decoder_image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-
-                    gt_imgs = torch.cat([gt_im1, gt_im2], dim=-2) / 255.
-                    pred_imgs = torch.cat([im1s, im2s], dim=-2)
-                    vid = torch.cat([gt_imgs, pred_imgs], dim=-3)
-                    vid = vid.detach().cpu().numpy()
-                    vid = (vid * 255).clip(0, 255).astype(np.uint8)
-                    vid = rearrange(vid, "t h w c -> t c h w")
-
-                    # Store specimen
-                    eval_specimens.append({
-                        'traj_id': eval_data['traj_id'][0],
-                        'start_idx': eval_data['start_idx'][0].item(),
-                        'loss': rollout_latent_mse,
-                        'video': wandb.Video(vid, fps=20, format='mp4'),
-                        'last_im1': im1s[-1].detach().cpu().numpy(),
-                        'last_im2': im2s[-1].detach().cpu().numpy(),
-                        'gt_last_im1': (gt_im1[-1] / 255.).detach().cpu().numpy(),
-                        'gt_last_im2': (gt_im2[-1] / 255.).detach().cpu().numpy(),
-                    })
-
-                    # Teacher forcing metrics for this sample (on the pred_step grid, matching training)
-                    # We need a new sample from expert_loader_eval for standard metrics.
-                    eval_data_tf = next(expert_loader_eval)
-                    idx_tf = torch.arange(BL, device=device, dtype=torch.long) * pred_step  # (BL,)
-
-                    tf_front_raw = eval_data_tf['cam_zed_embd'].to(device)
-                    tf_wrist_raw = eval_data_tf['cam_rs_embd'].to(device)
-                    tf_state_raw = eval_data_tf['state'].to(device)
-                    tf_acs_raw = eval_data_tf['action'].to(device)
-
-                    tf_front = tf_front_raw.index_select(1, idx_tf)
-                    tf_wrist = tf_wrist_raw.index_select(1, idx_tf)
-                    tf_state = normalize_states(tf_state_raw, state_min, state_max).index_select(1, idx_tf)
-
-                    tf_acs_norm_raw = normalize_acs(tf_acs_raw, action_min, action_max)
-                    tf_acs_tokens = _build_action_tokens_from_raw(
-                        tf_acs_norm_raw, idx_tf, pred_step=pred_step, mode=action_agg
+                    future_actions = all_acs[:, target_idx - action_horizon:target_idx]
+                    pred_front, pred_wrist, pred_state, _ = transition(
+                        input_front_embd_eval,
+                        input_wrist_embd_eval,
+                        input_states_eval,
+                        acs,
+                        future_actions,
                     )
-                    tf_acs = tf_acs_tokens[:, :-1]
 
-                    p_front, p_wrist, p_state, _ = transition(
-                        tf_front[:, :-1], tf_wrist[:, :-1], tf_state[:, :-1], tf_acs
-                    )
-                    l_front = nn.MSELoss()(p_front, tf_front[:, 1:]).item()
-                    l_wrist = nn.MSELoss()(p_wrist, tf_wrist[:, 1:]).item()
-                    l_state = nn.MSELoss()(p_state, tf_state[:, 1:]).item()
+                    target_front = gt_front_embd_eval[[0], target_idx]
+                    target_wrist = gt_wrist_embd_eval[[0], target_idx]
+                    target_state = normalize_states(gt_states_eval[[0], target_idx], state_min, state_max)
+
+                    l_front = nn.MSELoss()(pred_front[:, -1], target_front).item()
+                    l_wrist = nn.MSELoss()(pred_wrist[:, -1], target_wrist).item()
+                    l_state = nn.MSELoss()(pred_state[:, -1], target_state).item()
 
                     avg_metrics['eval_loss'] += (l_front + l_wrist + l_state)
                     avg_metrics['front_loss'] += l_front
                     avg_metrics['wrist_loss'] += l_wrist
                     avg_metrics['state_loss'] += l_state
 
+                    if sample_images is None:
+                        pred_latent = torch.cat([pred_front[:, [-1]], pred_wrist[:, [-1]]], dim=0)
+                        pred_ims, _ = decoder(pred_latent)
+                        pred_ims = rearrange(pred_ims, "(b t) c h w -> b t h w c", t=1)
+                        pred_im1, pred_im2 = torch.split(pred_ims, [1, 1], dim=0)
+                        gt_im1 = eval_data['agentview_image'][[0]].to(device)[:, target_idx] / 255.
+                        gt_im2 = eval_data['robot0_eye_in_hand_image'][[0]].to(device)[:, target_idx] / 255.
+                        gt_im1 = F.interpolate(
+                            gt_im1.permute(0, 3, 1, 2),
+                            size=DECODER_CONFIG['decoder_image_size'],
+                            mode='bilinear',
+                            align_corners=False,
+                        ).permute(0, 2, 3, 1)
+                        gt_im2 = F.interpolate(
+                            gt_im2.permute(0, 3, 1, 2),
+                            size=DECODER_CONFIG['decoder_image_size'],
+                            mode='bilinear',
+                            align_corners=False,
+                        ).permute(0, 2, 3, 1)
+                        sample_images = {
+                            'pred_front': pred_im1.squeeze(0).squeeze(0).detach().cpu().numpy(),
+                            'pred_wrist': pred_im2.squeeze(0).squeeze(0).detach().cpu().numpy(),
+                            'front': gt_im1.squeeze(0).detach().cpu().numpy(),
+                            'wrist': gt_im2.squeeze(0).detach().cpu().numpy(),
+                        }
+
             # Finalize metrics
             for k in avg_metrics:
                 avg_metrics[k] /= num_samples
-
-            # Sort and Log Table
-            eval_specimens.sort(key=lambda x: x['loss'], reverse=True)
-            rollout_mse_mean = float(np.mean([s['loss'] for s in eval_specimens])) if eval_specimens else float("nan")
-            rollout_mse_worst = float(eval_specimens[0]['loss']) if eval_specimens else float("nan")
-            columns = ["traj_id", "start_idx", "rollout_mse", "video"]
-            table = wandb.Table(columns=columns)
-            for spec in eval_specimens:
-                table.add_data(spec['traj_id'], spec['start_idx'], spec['loss'], spec['video'])
 
             # Print summary
             print(f"\rIter {i}, Eval Loss: {avg_metrics['eval_loss']:.4f}, front: {avg_metrics['front_loss']:.4f}, wrist: {avg_metrics['wrist_loss']:.4f}, state: {avg_metrics['state_loss']:.4f}")
@@ -846,19 +861,14 @@ def main():
                 'front_loss': avg_metrics['front_loss'],
                 'wrist_loss': avg_metrics['wrist_loss'],
                 'state_loss': avg_metrics['state_loss'],
-                'eval_rollout_mse_mean': rollout_mse_mean,
-                'eval_rollout_mse_worst': rollout_mse_worst,
-                'eval_failures_table': table,
-                'video': eval_specimens[0]['video'], # Worst case video
             }
-            # Add some sample images from the worst case
-            worst_case = eval_specimens[0]
-            log_dict.update({
-                'pred_front': wandb.Image(worst_case['last_im1']),
-                'pred_wrist': wandb.Image(worst_case['last_im2']),
-                'front': wandb.Image(worst_case['gt_last_im1']),
-                'wrist': wandb.Image(worst_case['gt_last_im2']),
-            })
+            if sample_images is not None:
+                log_dict.update({
+                    'pred_front': wandb.Image(sample_images['pred_front']),
+                    'pred_wrist': wandb.Image(sample_images['pred_wrist']),
+                    'front': wandb.Image(sample_images['front']),
+                    'wrist': wandb.Image(sample_images['wrist']),
+                })
             wandb.log(log_dict)
 
     plt.legend()

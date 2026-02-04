@@ -12,9 +12,9 @@ module purge
 module load brics/apptainer-multi-node
 
 # Paths
-home_dir="/home/u5dm/pravsels.u5dm"
+home_dir="/home/u6cr/pravsels.u6cr"
 repo_dir="${home_dir}/latent_safety"
-scratch_dir="/scratch/u5dm/pravsels.u5dm"
+scratch_dir="/scratch/u6cr/pravsels.u6cr"
 data_dir="${scratch_dir}/latent_safety"
 container="${data_dir}/container/latent_safety_arm64.sif"
 HF_CACHE="${scratch_dir}/huggingface_cache"

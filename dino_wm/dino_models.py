@@ -12,6 +12,8 @@ from torchvision import transforms
 from scipy.spatial.transform import Rotation
 from dino_wm.config import MODEL_CONFIG, get_dino_config
 
+FUTURE_ACTION_HORIZON_MAX = 100
+
 
 def batch_quat_to_rotvec(quaternions):
     """
@@ -275,6 +277,7 @@ class VideoTransformer(nn.Module):
         state_embed_dim: int,
         state_dim: int,
         action_dim: int, # Physical action dimension
+        action_horizon: int = 1,
         depth: int,
         heads: int,
         mlp_dim: int,
@@ -296,6 +299,13 @@ class VideoTransformer(nn.Module):
             self.dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name']).to(device)
         self.num_patches = dino_cfg['num_patches']
         
+        if action_horizon != FUTURE_ACTION_HORIZON_MAX:
+            raise ValueError(
+                "action_horizon is fixed for checkpoint compatibility "
+                f"(expected {FUTURE_ACTION_HORIZON_MAX}, got {action_horizon})"
+            )
+
+        self.action_horizon = FUTURE_ACTION_HORIZON_MAX
         # Improved action embedding
         self.action_encoder = nn.Sequential(
             nn.Linear(action_dim, 128), # Uses physical action dimension
@@ -305,6 +315,15 @@ class VideoTransformer(nn.Module):
             nn.Linear(128, action_embed_dim),
             nn.LayerNorm(action_embed_dim)
         ).to(device)
+        self.future_action_encoder = nn.Sequential(
+            nn.Linear(action_dim, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, action_embed_dim),
+            nn.LayerNorm(action_embed_dim),
+        ).to(device)
+        self.future_action_embed_dim = action_embed_dim * action_horizon
         
         # State encoder 
         self.state_encoder = nn.Sequential(
@@ -316,7 +335,7 @@ class VideoTransformer(nn.Module):
             nn.LayerNorm(state_embed_dim)
         ).to(device)
         
-        total_dim = 2*dim + action_embed_dim + state_embed_dim
+        total_dim = 2*dim + action_embed_dim + state_embed_dim + self.future_action_embed_dim
         self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, total_dim) * 0.02)  # Spatial: patch position within frame
         self.temp_embedding = nn.Parameter(torch.randn(1, num_frames, total_dim) * 0.02)  # Temporal: frame position in sequence
         
@@ -366,10 +385,11 @@ class VideoTransformer(nn.Module):
         video1: torch.Tensor,
         video2: torch.Tensor,
         states: torch.Tensor,
-        actions: torch.Tensor
+        actions: torch.Tensor,
+        future_actions: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         
-        x = self.forward_features(video1, video2, states, actions)
+        x = self.forward_features(video1, video2, states, actions, future_actions)
 
         # Generate predictions
         pred1 = self.front_head(x)
@@ -383,7 +403,8 @@ class VideoTransformer(nn.Module):
         video1: torch.Tensor,
         video2: torch.Tensor,
         states: torch.Tensor,
-        actions: torch.Tensor
+        actions: torch.Tensor,
+        future_actions: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Encode actions and states
         action_embeddings = self.action_encoder(actions).unsqueeze(2).expand(-1, -1, self.num_patches, -1)
@@ -391,8 +412,25 @@ class VideoTransformer(nn.Module):
         
         # Combine features
         batch_size, num_frames, _, _ = video1.shape
+        if future_actions is None:
+            future_action_embeddings = torch.zeros(
+                batch_size,
+                num_frames,
+                self.num_patches,
+                self.future_action_embed_dim,
+                device=video1.device,
+                dtype=video1.dtype,
+            )
+        else:
+            _, future_action_embeddings = self._encode_future_actions(
+                future_actions,
+                num_frames=num_frames,
+            )
     
-        x = torch.cat((video1, video2, action_embeddings, state_embeddings), dim=3)
+        x = torch.cat(
+            (video1, video2, action_embeddings, state_embeddings, future_action_embeddings),
+            dim=3,
+        )
         # Add positional embeddings: spatial (per-patch) + temporal (per-frame)
         x = x + self.pos_embedding  # Same patch positions applied to all frames
         x = x + self.temp_embedding[:, :num_frames].unsqueeze(2)  # Same frame position applied to all patches
@@ -408,6 +446,35 @@ class VideoTransformer(nn.Module):
         # Reshape back
         x = rearrange(x, 'b (s n) d -> b s n d', s=num_frames)
         return x
+
+    def _encode_future_actions(
+        self,
+        future_actions: torch.Tensor,
+        *,
+        num_frames: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if future_actions.ndim != 3:
+            raise ValueError(
+                "future_actions must have shape (batch, horizon, action_dim); "
+                f"got {tuple(future_actions.shape)}"
+            )
+        batch_size, horizon, _ = future_actions.shape
+        if horizon != self.action_horizon:
+            raise ValueError(
+                "future_actions horizon does not match action_horizon "
+                f"(got {horizon}, expected {self.action_horizon})"
+            )
+        future_action_emb = self.future_action_encoder(
+            future_actions.reshape(-1, future_actions.shape[-1])
+        ).reshape(batch_size, horizon, -1)
+        future_action_flat = future_action_emb.reshape(batch_size, -1)
+        future_action_broadcast = (
+            future_action_flat
+            .unsqueeze(1)
+            .unsqueeze(2)
+            .expand(-1, num_frames, self.num_patches, -1)
+        )
+        return future_action_emb, future_action_broadcast
 
     def failure_pred(self, features):
         # features: (batch, num_frames, num_patches, dim)

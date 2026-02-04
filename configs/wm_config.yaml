@@ -14,7 +14,9 @@ device: "cuda:0"
 seed: 0
 sequence_length: 4
 # Time-step in raw dataset frames. pred_step=5 means train/eval on t->t+5.
-pred_step: 5
+pred_step: 1
+# Number of future raw-frame actions to condition on.
+action_horizon: 100
 eval_horizon: 16
 context_length: 3
 # How to form one action token per model-step interval when pred_step > 1.
