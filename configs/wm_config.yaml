@@ -13,8 +13,12 @@ train_iters: 100000
 device: "cuda:0"
 seed: 0
 sequence_length: 4
+# Time-step in raw dataset frames. pred_step=5 means train/eval on t->t+5.
+pred_step: 5
 eval_horizon: 16
 context_length: 3
+# How to form one action token per model-step interval when pred_step > 1.
+action_aggregation: sum
 eval_interval: 1000
 eval_samples: 8
 save_every: 1000
