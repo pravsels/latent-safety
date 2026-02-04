@@ -18,13 +18,14 @@ scratch_dir="/scratch/u6cr/pravsels.u6cr/latent_safety"
 container="${scratch_dir}/container/latent_safety_arm64.sif"
 HF_CACHE="/scratch/u6cr/pravsels.u6cr/huggingface_cache"
 SCRATCH_WEIGHTS="/scratch/u6cr/pravsels.u6cr/latent_safety/weights"
+PYTHON_PACKAGES="/scratch/u6cr/pravsels.u6cr/latent_safety/python_packages"
 
 # Input/Output config
 DATASETS_LIST="${repo_dir}/arx5_datasets_new.json"
 OUTPUT_HDF5="${scratch_dir}/arx5_datasets_new.h5"
 BATCH_SIZE=256
 
-mkdir -p "${scratch_dir}" "${HF_CACHE}"
+mkdir -p "${scratch_dir}" "${HF_CACHE}" "${PYTHON_PACKAGES}"
 
 start_time="$(date -Is --utc)"
 
@@ -46,7 +47,7 @@ apptainer exec --nv \
     --bind "${SCRATCH_WEIGHTS}:${repo_dir}/weights" \
     --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
-    bash -c "export PYTHONPATH=${repo_dir}:\$PYTHONPATH && ${GEN_CMD}"
+    bash -c "export PYTHONPATH=${PYTHON_PACKAGES}:${repo_dir}:\$PYTHONPATH && ${GEN_CMD}"
 
 end_time="$(date -Is --utc)"
 echo
