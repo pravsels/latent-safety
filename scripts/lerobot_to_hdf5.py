@@ -457,8 +457,25 @@ def main():
                 if usage.free < 2 * 1024**3: # 2GB
                     print("⚠️ Low disk space! Stopping.")
                 else:
-                    print(f"🍬 Loading RoboCandyWrapper dataset for {len(dataset_ids)} repos...")
-                    dataset = make_dataset_without_config(dataset_ids)
+                    print(f"🍬 Validating RoboCandyWrapper datasets for required keys...")
+                    required_keys = {"observation.images.front", "observation.images.wrist"}
+                    valid_repo_ids = []
+                    skipped_repo_ids = []
+                    for repo_id in dataset_ids:
+                        try:
+                            probe = make_dataset_without_config([repo_id])
+                            feature_keys = set(getattr(probe, "features", {}).keys())
+                            if required_keys.issubset(feature_keys):
+                                valid_repo_ids.append(repo_id)
+                            else:
+                                skipped_repo_ids.append(repo_id)
+                        except Exception as e:
+                            skipped_repo_ids.append(repo_id)
+                            print(f"⚠️ Skipping {repo_id}: {e}")
+                    if skipped_repo_ids:
+                        print(f"⚠️ Skipping {len(skipped_repo_ids)} repos missing required keys.")
+                    print(f"🍬 Loading RoboCandyWrapper dataset for {len(valid_repo_ids)} repos...")
+                    dataset = make_dataset_without_config(valid_repo_ids)
                     traj_counter = process_dataset_object(
                         dataset=dataset,
                         dataset_id="mixed",
