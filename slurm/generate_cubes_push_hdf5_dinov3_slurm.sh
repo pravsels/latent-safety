@@ -20,13 +20,17 @@ container="${data_dir}/container/latent_safety_arm64.sif"
 HF_CACHE="${scratch_dir}/huggingface_cache"
 SCRATCH_WEIGHTS="${data_dir}/weights"
 PYTHON_EXT_DIR="${data_dir}/python_packages"
+WANDB_DIR="${data_dir}/wandb"
+WANDB_CACHE_DIR="${data_dir}/wandb_cache"
+WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 
 # Input/Output config
 INPUT_HDF5="${data_dir}/cubes_push_labeled_combined.h5"
 OUTPUT_HDF5="${data_dir}/cubes_push_labeled_combined_v3.h5"
 BATCH_SIZE=256
 
-mkdir -p "${data_dir}" "${HF_CACHE}" "${PYTHON_EXT_DIR}"
+mkdir -p "${data_dir}" "${HF_CACHE}" "${PYTHON_EXT_DIR}" \
+  "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
 
 start_time="$(date -Is --utc)"
 
@@ -50,6 +54,7 @@ apptainer exec --nv \
     --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
     bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
+        export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
         export OMP_NUM_THREADS=16 OPENBLAS_NUM_THREADS=16 MKL_NUM_THREADS=16 NUMEXPR_NUM_THREADS=16 && \
         ${GEN_CMD}"
 

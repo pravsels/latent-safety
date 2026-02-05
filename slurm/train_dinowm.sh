@@ -23,6 +23,10 @@ repo_dir="${home_dir}/latent_safety"
 data_dir="${scratch_dir}/latent_safety"
 container="${data_dir}/container/latent_safety_arm64.sif"
 PYTHON_EXT_DIR="${data_dir}/python_packages"
+HF_CACHE="${scratch_dir}/huggingface_cache"
+WANDB_DIR="${data_dir}/wandb"
+WANDB_CACHE_DIR="${data_dir}/wandb_cache"
+WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 
 # Training config
 HDF5_FILE="${data_dir}/arx5_datasets_new.h5"
@@ -32,7 +36,8 @@ DECODER_CHECKPOINT="${data_dir}/dino_decoder_checkpoints/testing_decoder.pth"
 CONFIG_FILE="configs/wm_config.yaml"
 CONFIG_PATH="${repo_dir}/${CONFIG_FILE}"
 
-mkdir -p "${CHECKPOINT_DIR}" "${PYTHON_EXT_DIR}"
+mkdir -p "${CHECKPOINT_DIR}" "${PYTHON_EXT_DIR}" "${HF_CACHE}" \
+  "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
 
 # Ensure repo weights path points to scratch weights for relative lookups
 if [ -L "${repo_dir}/weights" ] || [ ! -e "${repo_dir}/weights" ]; then
@@ -74,8 +79,11 @@ srun --ntasks=4 --gpus-per-task=1 --cpu-bind=cores \
 apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \
+    --bind "${HF_CACHE}:/root/.cache/huggingface" \
+    --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
     bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
+        export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
         if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"torchmetrics\") else 1)'; then \
             ${INSTALL_TORCHMETRICS_CMD}; \
         fi && ${STATS_CMD} && ${TRAIN_CMD}"

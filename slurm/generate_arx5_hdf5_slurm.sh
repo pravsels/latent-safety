@@ -19,6 +19,9 @@ container="${scratch_dir}/container/latent_safety_arm64.sif"
 HF_CACHE="/scratch/u6cr/pravsels.u6cr/huggingface_cache"
 SCRATCH_WEIGHTS="/scratch/u6cr/pravsels.u6cr/latent_safety/weights"
 PYTHON_PACKAGES="/scratch/u6cr/pravsels.u6cr/latent_safety/python_packages"
+WANDB_DIR="${scratch_dir}/wandb"
+WANDB_CACHE_DIR="${scratch_dir}/wandb_cache"
+WANDB_CONFIG_DIR="${scratch_dir}/wandb_config"
 HF_TOKEN_FILE="${home_dir}/.hf_token"
 
 # Input/Output config
@@ -26,7 +29,8 @@ DATASETS_LIST="${scratch_dir}/arx5_datasets_new.json"
 OUTPUT_HDF5="${scratch_dir}/arx5_datasets_new.h5"
 BATCH_SIZE=256
 
-mkdir -p "${scratch_dir}" "${HF_CACHE}" "${PYTHON_PACKAGES}"
+mkdir -p "${scratch_dir}" "${HF_CACHE}" "${PYTHON_PACKAGES}" \
+  "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
 
 if [[ -f "${HF_TOKEN_FILE}" ]]; then
   export HF_TOKEN
@@ -56,7 +60,9 @@ apptainer exec --nv \
     --env "HF_HOME=/root/.cache/huggingface" \
     --env "HF_TOKEN=${HF_TOKEN:-}" \
     "${container}" \
-    bash -c "export PYTHONPATH=${PYTHON_PACKAGES}:${repo_dir}:\$PYTHONPATH && ${GEN_CMD}"
+    bash -c "export PYTHONPATH=${PYTHON_PACKAGES}:${repo_dir}:\$PYTHONPATH && \
+        export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
+        ${GEN_CMD}"
 
 end_time="$(date -Is --utc)"
 echo

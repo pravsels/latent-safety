@@ -17,6 +17,10 @@ scratch_dir="/scratch/u6cr/pravsels.u6cr"
 repo_dir="${home_dir}/latent_safety"
 data_dir="${scratch_dir}/latent_safety"
 container="${data_dir}/container/latent_safety_arm64.sif"
+HF_CACHE="${scratch_dir}/huggingface_cache"
+WANDB_DIR="${data_dir}/wandb"
+WANDB_CACHE_DIR="${data_dir}/wandb_cache"
+WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 
 # Training config (weights and checkpoints on scratch due to limited home storage)
 HDF5_FILE="${data_dir}/arx5_datasets_new.h5"
@@ -24,7 +28,8 @@ CHECKPOINT_DIR="${data_dir}/dino_decoder_checkpoints"
 CONFIG_FILE="configs/dino_decoder_config.yaml"
 CONFIG_PATH="${repo_dir}/${CONFIG_FILE}"
 
-mkdir -p "${CHECKPOINT_DIR}"
+mkdir -p "${CHECKPOINT_DIR}" "${HF_CACHE}" \
+  "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
 
 start_time="$(date -Is --utc)"
 
@@ -86,8 +91,12 @@ srun --ntasks=1 --gpus-per-task=1 --cpu-bind=cores \
 apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \
+    --bind "${HF_CACHE}:/root/.cache/huggingface" \
+    --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
-    bash -c "export PYTHONPATH=${repo_dir}:\$PYTHONPATH && ${TRAIN_CMD}"
+    bash -c "export PYTHONPATH=${repo_dir}:\$PYTHONPATH && \
+        export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
+        ${TRAIN_CMD}"
 
 end_time="$(date -Is --utc)"
 echo

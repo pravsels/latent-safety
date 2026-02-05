@@ -23,6 +23,10 @@ repo_dir="${home_dir}/latent_safety"
 data_dir="${scratch_dir}/latent_safety"
 container="${data_dir}/container/latent_safety_arm64.sif"
 PYTHON_EXT_DIR="${data_dir}/python_packages"
+HF_CACHE="${scratch_dir}/huggingface_cache"
+WANDB_DIR="${data_dir}/wandb"
+WANDB_CACHE_DIR="${data_dir}/wandb_cache"
+WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 
 # Training config (weights and checkpoints on scratch due to limited home storage)
 HDF5_FILE="${data_dir}/cubes_push_labeled_combined_v3.h5"
@@ -35,7 +39,8 @@ SEQUENCE_LENGTH=4
 WANDB_PROJECT="latent-safety"
 WANDB_NAME="cubes_push_classifier"
 
-mkdir -p "${CHECKPOINT_DIR}" "${repo_dir}/logs" "${PYTHON_EXT_DIR}"
+mkdir -p "${CHECKPOINT_DIR}" "${repo_dir}/logs" "${PYTHON_EXT_DIR}" \
+  "${HF_CACHE}" "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
 
 start_time="$(date -Is --utc)"
 echo "===================================="
@@ -71,8 +76,12 @@ srun --ntasks=1 --gpus-per-task=1 --cpu-bind=cores \
 apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \
+    --bind "${HF_CACHE}:/root/.cache/huggingface" \
+    --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
-    bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && ${TRAIN_CMD}"
+    bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
+        export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
+        ${TRAIN_CMD}"
 EXIT_CODE=$?
 set -e
 
