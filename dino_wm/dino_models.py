@@ -3,6 +3,7 @@
 
 
 import torch
+from pathlib import Path
 from torch import nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
@@ -12,7 +13,20 @@ from torchvision import transforms
 from scipy.spatial.transform import Rotation
 from dino_wm.config import MODEL_CONFIG, get_dino_config
 
-FUTURE_ACTION_HORIZON_MAX = 100
+def _load_action_horizon_from_config() -> int:
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "wm_config.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    import ruamel.yaml as ryaml
+
+    yaml = ryaml.YAML(typ="safe")
+    cfg = yaml.load(config_path.read_text()) or {}
+    if "action_horizon" not in cfg:
+        raise KeyError("wm_config.yaml missing required key: action_horizon")
+    return int(cfg["action_horizon"])
+
+
+FUTURE_ACTION_HORIZON_MAX = _load_action_horizon_from_config()
 
 
 def batch_quat_to_rotvec(quaternions):
@@ -219,8 +233,8 @@ class MultiHeadAttention(nn.Module):
         self.to_out = nn.Linear(inner_dim, dim)
         
         self.dropout = nn.Dropout(dropout)
-        
-        # Register buffer instead of creating mask every forward pass
+        self.patches_per_frame = patches_per_frame
+        # Register an initial mask buffer (may be resized in forward).
         mask = self._create_causal_mask(num_frames, patches_per_frame)
         self.register_buffer("mask", mask)
         
@@ -255,6 +269,16 @@ class MultiHeadAttention(nn.Module):
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         
+        if seq_len % self.patches_per_frame != 0:
+            # seq_len should be num_frames * patches_per_frame after flattening.
+            raise ValueError(
+                "seq_len must be a multiple of patches_per_frame "
+                f"(got seq_len={seq_len}, patches_per_frame={self.patches_per_frame})"
+            )
+        num_frames = seq_len // self.patches_per_frame
+        if self.mask.shape[0] < seq_len:
+            new_mask = self._create_causal_mask(num_frames, self.patches_per_frame).to(x.device)
+            self.mask = new_mask
         # Use registered mask buffer
         mask = self.mask[:seq_len, :seq_len]
         dots = dots.masked_fill(mask == 0, float('-inf'))
@@ -269,9 +293,9 @@ class MultiHeadAttention(nn.Module):
 
 class TransformerBlock(nn.Module):
     def __init__(self, dim: int, heads: int, dim_head: int, mlp_dim: int, dropout: float = 0., 
-                 num_frames: int = 2):
+                 num_frames: int = 2, patches_per_frame: int = 256):
         super().__init__()
-        self.attn = MultiHeadAttention(dim, heads, dim_head, dropout, num_frames)
+        self.attn = MultiHeadAttention(dim, heads, dim_head, dropout, num_frames, patches_per_frame)
         self.ff = FeedForward(dim, mlp_dim, dropout)
         self.norm1 = LayerNorm(dim)
         self.norm2 = LayerNorm(dim)
@@ -280,6 +304,25 @@ class TransformerBlock(nn.Module):
         x = x + self.attn(self.norm1(x))
         x = x + self.ff(self.norm2(x))
         return x
+
+class TrajectoryEncoder(nn.Module):
+    def __init__(self, action_dim: int, trajectory_summary_dim: int):
+        super().__init__()
+        self.conv1 = nn.Conv1d(action_dim, 128, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(128, 256, kernel_size=3, padding=1, stride=2)
+        self.conv3 = nn.Conv1d(
+            256, trajectory_summary_dim, kernel_size=3, padding=1, stride=2
+        )
+
+    def forward(self, future_actions: torch.Tensor) -> torch.Tensor:
+        # future_actions: (B, T, action_dim) -> (B, action_dim, T) for Conv1d
+        x = rearrange(future_actions, 'b t c -> b c t')
+        # Temporal Conv stack with downsampling (stride=2 twice).
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = self.conv3(x)
+        # Global average over time -> (B, trajectory_summary_dim)
+        return F.adaptive_avg_pool1d(x, 1).squeeze(-1)
 
 class VideoTransformer(nn.Module):
     def __init__(
@@ -292,6 +335,7 @@ class VideoTransformer(nn.Module):
         state_dim: int,
         action_dim: int, # Physical action dimension
         action_horizon: int = 1,
+        trajectory_summary_dim: int = 512,
         depth: int,
         heads: int,
         mlp_dim: int,
@@ -329,15 +373,10 @@ class VideoTransformer(nn.Module):
             nn.Linear(128, action_embed_dim),
             nn.LayerNorm(action_embed_dim)
         ).to(device)
-        self.future_action_encoder = nn.Sequential(
-            nn.Linear(action_dim, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, action_embed_dim),
-            nn.LayerNorm(action_embed_dim),
-        ).to(device)
-        self.future_action_embed_dim = action_embed_dim * action_horizon
+
+        self.trajectory_encoder = TrajectoryEncoder(action_dim, trajectory_summary_dim).to(device)
+        
+        self.future_action_embed_dim = trajectory_summary_dim
         
         # State encoder 
         self.state_encoder = nn.Sequential(
@@ -357,7 +396,15 @@ class VideoTransformer(nn.Module):
         
         # Use TransformerBlock instead of separate components
         self.transformer = nn.ModuleList([
-            TransformerBlock(total_dim, heads, dim_head, mlp_dim, dropout, num_frames)
+            TransformerBlock(
+                total_dim,
+                heads,
+                dim_head,
+                mlp_dim,
+                dropout,
+                num_frames,
+                self.num_patches,
+            )
             for _ in range(depth)
         ])
         
@@ -401,9 +448,15 @@ class VideoTransformer(nn.Module):
         states: torch.Tensor,
         actions: torch.Tensor,
         future_actions: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
-        x = self.forward_features(video1, video2, states, actions, future_actions)
+        x = self.forward_features(
+            video1,
+            video2,
+            states,
+            actions,
+            future_actions,
+        )
 
         # Generate predictions
         pred1 = self.front_head(x)
@@ -419,7 +472,7 @@ class VideoTransformer(nn.Module):
         states: torch.Tensor,
         actions: torch.Tensor,
         future_actions: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         # Encode actions and states
         action_embeddings = self.action_encoder(actions).unsqueeze(2).expand(-1, -1, self.num_patches, -1)
         state_embeddings = self.state_encoder(states).unsqueeze(2).expand(-1, -1, self.num_patches, -1)
@@ -473,17 +526,19 @@ class VideoTransformer(nn.Module):
                 f"got {tuple(future_actions.shape)}"
             )
         batch_size, horizon, _ = future_actions.shape
-        if horizon != self.action_horizon:
+        if horizon > self.action_horizon:
             raise ValueError(
-                "future_actions horizon does not match action_horizon "
-                f"(got {horizon}, expected {self.action_horizon})"
+                "future_actions horizon exceeds action_horizon "
+                f"(got {horizon}, max {self.action_horizon})"
             )
-        future_action_emb = self.future_action_encoder(
-            future_actions.reshape(-1, future_actions.shape[-1])
-        ).reshape(batch_size, horizon, -1)
-        future_action_flat = future_action_emb.reshape(batch_size, -1)
+
+        if horizon < self.action_horizon:
+            pad_len = self.action_horizon - horizon
+            future_actions = F.pad(future_actions, (0, 0, 0, pad_len))
+
+        future_action_emb = self.trajectory_encoder(future_actions)
         future_action_broadcast = (
-            future_action_flat
+            future_action_emb
             .unsqueeze(1)
             .unsqueeze(2)
             .expand(-1, num_frames, self.num_patches, -1)

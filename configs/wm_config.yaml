@@ -3,8 +3,8 @@
 #   python dino_wm/train_dino_wm.py --config configs/wm_config.yaml
 
 # Data
-hdf5_file: arx5_datasets_new.h5
-dataset_stats: arx5_datasets_new_stats.json
+hdf5_file: arx5_datasets_6Feb_26.h5
+dataset_stats: arx5_datasets_6Feb_26_stats.json
 test_frac: 0.1
 action_key: actions_delta
 
@@ -12,13 +12,13 @@ action_key: actions_delta
 batch_size: 32
 train_iters: 100000
 device: "cuda:0"
-seed: 0
+seed: 42
 sequence_length: 4
 # Time-step in raw dataset frames. pred_step=5 means train/eval on t->t+5.
-pred_step: 1
+pred_step: 5
 # Number of future raw-frame actions to condition on.
 action_horizon: 100
-future_action_steps_train: 50
+future_action_steps_train: 100
 eval_horizon: 16
 context_length: 3
 eval_interval: 1000
@@ -27,18 +27,18 @@ save_every: 1000
 
 # World Model / Decoder
 dino_version: "v3"
-decoder_checkpoint: dino_decoder_checkpoints/testing_decoder.pth
+dino_assets:
+  decoder_checkpoint_dir: dino3_decoder_checkpoints
+  wm_checkpoint_dir: dino3_wm_checkpoints
 
 # Resume behavior
-auto_resume: false
-resume_checkpoint: null
-start_iter: 0
+auto_resume: true
 
 # WandB
 wandb_mode: offline
 wandb_project: dino-WM-action-horizon
 wandb_entity: pravsels
-wandb_name: dinov3-wm
+wandb_name: dinov3-wm-action-horizon-first-run
 
 # Optimizer / LR scheduling
 lr_schedule: cosine

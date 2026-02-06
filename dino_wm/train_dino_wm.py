@@ -41,6 +41,7 @@ if _REPO_ROOT not in sys.path:
 from test_loader import SplitTrajectoryDataset
 from dino_decoder import VQVAE
 from dino_models import VideoTransformer, normalize_acs, normalize_states, unnormalize_states
+from dino_wm.checkpoint_utils import filter_state_dict_by_shape
 from dino_wm.config import MODEL_CONFIG, TRAIN_CONFIG, DECODER_CONFIG, get_dino_config, get_decoder_image_size
 
 
@@ -146,59 +147,6 @@ def _compute_lr_factor(
     return float(min_lr_factor) + (1.0 - float(min_lr_factor)) * cosine
 
 
-def _build_action_tokens_from_raw(
-    norm_actions_raw: torch.Tensor,
-    step_starts: torch.Tensor,
-    pred_step: int,
-    mode: str,
-) -> torch.Tensor:
-    """
-    Build one action token per model step from raw per-frame actions.
-
-    Args:
-        norm_actions_raw: (B, T, A) normalized actions at raw frame rate.
-        step_starts: (L,) raw indices t for each model step start.
-        pred_step: size of each model step in raw frames (>=1).
-        mode:
-          - "start": use a_t
-          - "last":  use a_{t+pred_step-1}
-          - "mean":  mean over a_t..a_{t+pred_step-1} (clipped at sequence end)
-          - "sum":   sum  over a_t..a_{t+pred_step-1} (clipped at sequence end)
-
-    Returns:
-        (B, L, A) action tokens aligned to each step start.
-    """
-    if pred_step < 1:
-        raise ValueError(f"pred_step must be >= 1 (got {pred_step})")
-    if norm_actions_raw.ndim != 3:
-        raise ValueError(f"norm_actions_raw must have shape (B,T,A); got {tuple(norm_actions_raw.shape)}")
-    if step_starts.ndim != 1:
-        raise ValueError(f"step_starts must have shape (L,); got {tuple(step_starts.shape)}")
-
-    B, T, A = norm_actions_raw.shape
-    step_starts = step_starts.to(device=norm_actions_raw.device, dtype=torch.long)
-
-    if mode == "start" or pred_step == 1:
-        # (B, T, A): dim=1 is the time axis, so we select timesteps given by step_starts.
-        return norm_actions_raw.index_select(1, step_starts)
-
-    if mode == "last":
-        idx_last = torch.clamp(step_starts + (pred_step - 1), max=T - 1)
-        return norm_actions_raw.index_select(1, idx_last)
-
-    if mode in ("mean", "sum"):
-        toks = []
-        for t in step_starts.tolist():
-            if t >= T:
-                window = norm_actions_raw[:, (T - 1):T]  # (B,1,A)
-            else:
-                t_end = min(T, t + pred_step)
-                window = norm_actions_raw[:, t:t_end]  # (B,K,A)
-            toks.append(window.mean(dim=1) if mode == "mean" else window.sum(dim=1))
-        return torch.stack(toks, dim=1)
-
-    raise ValueError(f"Unknown action aggregation mode '{mode}'")
-
 
 def compute_action_horizon_indices(
     *,
@@ -213,10 +161,15 @@ def compute_action_horizon_indices(
         raise ValueError(f"pred_step must be >= 1 (got {pred_step})")
     if action_horizon < 1:
         raise ValueError(f"action_horizon must be >= 1 (got {action_horizon})")
+    # Context indices are spaced by pred_step in raw-frame time.
+    # action_horizon here is the MAX horizon used to size segments; training may
+    # later sample a shorter future_len per batch.
     ctx_idx = torch.arange(context_length, device=device, dtype=torch.long) * pred_step
-    t = int(ctx_idx[-1].item())
-    future_slice = slice(t, t + action_horizon)
-    target_idx = t + action_horizon
+    last_ctx_idx = int(ctx_idx[-1].item())  # current (latest) context time t
+    # Condition on actions a_{t+1}..a_{t+action_horizon} (end-exclusive slice).
+    future_slice = slice(last_ctx_idx + 1, last_ctx_idx + 1 + action_horizon)
+    # Predict the observation/state at t + action_horizon + 1.
+    target_idx = last_ctx_idx + action_horizon + 1
     segment_length = target_idx + 1
     return ctx_idx, future_slice, target_idx, segment_length
 
@@ -234,26 +187,13 @@ def compute_action_horizon_ar_indices(
         action_horizon=action_horizon,
         device=device,
     )
+    # AR pass shifts everything forward by one step:
+    # - future action window becomes a_{t+2}..a_{t+action_horizon+1}
+    # - target becomes the next frame t+action_horizon+2
     ar_future_slice = slice(future_slice.start + 1, future_slice.stop + 1)
     ar_target_idx = target_idx + 1
     segment_length = ar_target_idx + 1
     return ctx_idx, future_slice, target_idx, ar_future_slice, ar_target_idx, segment_length
-
-
-def compute_eval_t_plus_k_indices(
-    *,
-    context_length: int,
-    pred_step: int,
-    action_horizon: int,
-    device: str | torch.device | None = None,
-) -> tuple[torch.Tensor, int, int]:
-    ctx_idx, _, target_idx, segment_length = compute_action_horizon_indices(
-        context_length=context_length,
-        pred_step=pred_step,
-        action_horizon=action_horizon,
-        device=device,
-    )
-    return ctx_idx, target_idx, segment_length
 
 
 def sample_future_action_window(
@@ -262,6 +202,9 @@ def sample_future_action_window(
     future_action_steps_train: int,
     rng: random.Random | None = None,
 ) -> int:
+    # action_horizon is the max horizon (e.g., 100). We sample a shorter
+    # training horizon per batch (<= future_action_steps_train) to vary
+    # the conditioning length across updates.
     if action_horizon < 1:
         raise ValueError(f"action_horizon must be >= 1 (got {action_horizon})")
     if future_action_steps_train < 1:
@@ -286,6 +229,19 @@ def parse_args(argv=None):
     )
     pre_args, remaining_argv = pre_parser.parse_known_args(argv)
     cfg = _load_yaml_config(pre_args.config)
+    if isinstance(cfg, dict) and isinstance(cfg.get("dino_assets"), dict):
+        dino_assets = cfg["dino_assets"]
+        if "decoder_checkpoint_dir" in dino_assets:
+            cfg.setdefault(
+                "decoder_checkpoint",
+                os.path.join(dino_assets["decoder_checkpoint_dir"], "best_decoder.pth"),
+            )
+        if "wm_checkpoint_dir" in dino_assets:
+            cfg.setdefault(
+                "resume_checkpoint",
+                os.path.join(dino_assets["wm_checkpoint_dir"], "best_wm.pth"),
+            )
+            cfg.setdefault("checkpoint_dir", dino_assets["wm_checkpoint_dir"])
 
     parser = argparse.ArgumentParser(
         description="Train DINO World Model on trajectory data",
@@ -598,8 +554,6 @@ def main():
         action_horizon=action_horizon,
         device="cpu",
     )
-    imagine_raw_len = train_raw_len
-
     expert_data = SplitTrajectoryDataset(
         hdf5_file,
         train_raw_len,
@@ -616,7 +570,7 @@ def main():
     )
     expert_data_imagine = SplitTrajectoryDataset(
         hdf5_file,
-        imagine_raw_len,
+        train_raw_len,
         split='test',
         num_test=num_test,
         action_key=args.action_key,
@@ -647,7 +601,22 @@ def main():
 
     # Load decoder
     decoder = VQVAE().to(device)
-    decoder.load_state_dict(torch.load(args.decoder_checkpoint, map_location=device))
+    decoder_ckpt = torch.load(args.decoder_checkpoint, map_location=device)
+    if isinstance(decoder_ckpt, dict) and "model_state_dict" in decoder_ckpt:
+        decoder_state = decoder_ckpt["model_state_dict"]
+    else:
+        decoder_state = decoder_ckpt
+    filtered, missing, unexpected, mismatched = filter_state_dict_by_shape(
+        decoder.state_dict(),
+        decoder_state,
+    )
+    decoder.load_state_dict(filtered, strict=False)
+    if missing:
+        print(f"Warning: decoder missing {len(missing)} keys from checkpoint.")
+    if unexpected:
+        print(f"Warning: decoder has {len(unexpected)} unexpected keys in checkpoint.")
+    if mismatched:
+        print(f"Warning: decoder skipped {len(mismatched)} mismatched keys.")
     decoder.eval()
     print(f"Loaded decoder from {args.decoder_checkpoint}")
 
@@ -700,18 +669,43 @@ def main():
         print(f"Resuming from checkpoint: {resume_path}")
         ckpt = torch.load(resume_path, map_location=device)
         if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-            transition_module.load_state_dict(ckpt['model_state_dict'])
+            filtered, missing, unexpected, mismatched = filter_state_dict_by_shape(
+                transition_module.state_dict(),
+                ckpt['model_state_dict'],
+            )
+            transition_module.load_state_dict(filtered, strict=False)
+            if missing:
+                print(f"Warning: missing {len(missing)} keys from checkpoint.")
+            if unexpected:
+                print(f"Warning: {len(unexpected)} unexpected keys in checkpoint.")
+            if mismatched:
+                print(f"Warning: {len(mismatched)} keys had shape mismatches and were skipped.")
             if 'optimizer_state_dict' in ckpt:
-                try:
-                    optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-                except Exception as e:
-                    print(f"Warning: failed to load optimizer state ({e}); continuing with fresh optimizer.")
+                if missing or mismatched:
+                    print("Warning: skipping optimizer state due to partial model load.")
+                else:
+                    try:
+                        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                    except Exception as e:
+                        print(f"Warning: failed to load optimizer state ({e}); continuing with fresh optimizer.")
             if 'iter' in ckpt:
                 start_iter = int(ckpt['iter']) + 1
             if 'best_eval' in ckpt and best_eval == float('inf'):
                 best_eval = ckpt['best_eval']
         else:
-            transition_module.load_state_dict(ckpt)
+            filtered, missing, unexpected, mismatched = filter_state_dict_by_shape(
+                transition_module.state_dict(),
+                ckpt,
+            )
+            transition_module.load_state_dict(filtered, strict=False)
+            if missing:
+                print(f"Warning: missing {len(missing)} keys from checkpoint.")
+            if unexpected:
+                print(f"Warning: {len(unexpected)} unexpected keys in checkpoint.")
+            if mismatched:
+                print(f"Warning: {len(mismatched)} keys had shape mismatches and were skipped.")
+            if missing or mismatched:
+                print("Warning: skipping optimizer state due to partial model load.")
 
     transition.train()
 
@@ -757,19 +751,25 @@ def main():
 
         data = next(expert_loader)
 
-        ctx_idx, _, target_idx, _, ar_target_idx, _ = compute_action_horizon_ar_indices(
-            context_length=H,
-            pred_step=pred_step,
-            action_horizon=action_horizon,
-            device=device,
-        )
+        ctx_idx = torch.arange(H, device=device, dtype=torch.long) * pred_step
         t = int(ctx_idx[-1].item())
         future_len = sample_future_action_window(
             action_horizon=action_horizon,
             future_action_steps_train=future_action_steps_train,
         )
-        future_slice = slice(t, t + future_len)
-        ar_future_slice = slice(t + 1, t + 1 + future_len)
+        # Future actions are a_{t+1}..a_{t+future_len}; target is t+future_len+1.
+        future_slice = slice(t + 1, t + 1 + future_len)
+        target_idx = t + future_len + 1
+        ar_future_slice = slice(t + 2, t + 2 + future_len)
+        ar_target_idx = t + future_len + 2
+        if is_rank0 and i == start_iter:
+            print(f"Context idx (pred_step={pred_step}): {ctx_idx.tolist()}")
+            print(f"t (last context idx): {t}")
+            print(f"future_len: {future_len}")
+            print(
+                f"Target idx: {t}+{future_len}+1 -> {target_idx}; "
+                f"AR target idx: {t}+{future_len}+2 -> {ar_target_idx}"
+            )
 
         gt_front_raw = data['cam_zed_embd'].to(device)
         input_front_embd = gt_front_raw.index_select(1, ctx_idx)
@@ -790,9 +790,14 @@ def main():
         norm_gt_acs_raw = normalize_acs(
             gt_acs_raw, action_min, action_max, q02=action_q02, q98=action_q98
         )
-        # Build action tokens aligned to each context step start in ctx_idx.
-        input_acs = _build_action_tokens_from_raw(norm_gt_acs_raw, ctx_idx, pred_step=pred_step, mode=action_agg)
+        # Action tokens aligned to each context step index.
+        input_acs = norm_gt_acs_raw.index_select(1, ctx_idx)
         future_actions = norm_gt_acs_raw[:, future_slice]
+        if is_rank0 and i == start_iter:
+            print(
+                f"\nFuture actions shape: {tuple(future_actions.shape)} "
+                f"(future_len={future_len})"
+            )
 
         optimizer.zero_grad()
 
@@ -823,12 +828,7 @@ def main():
                 dim=1,
             )
             ctx_idx_ar = torch.cat([ctx_idx[1:], torch.tensor([target_idx], device=device)])
-            input_acs_ar = _build_action_tokens_from_raw(
-                norm_gt_acs_raw,
-                ctx_idx_ar,
-                pred_step=pred_step,
-                mode=action_agg,
-            )
+            input_acs_ar = norm_gt_acs_raw.index_select(1, ctx_idx_ar)
             future_actions_ar = norm_gt_acs_raw[:, ar_future_slice]
             pred_front_ar, pred_wrist_ar, pred_state_ar, _ = transition(
                 input_front_ar,
@@ -899,17 +899,13 @@ def main():
                     # Get sample for single-step t+K evaluation
                     eval_data = next(expert_loader_imagine)
                     gt_front_embd_eval = eval_data['cam_zed_embd'].to(device)
-                    ctx_idx, target_idx, _ = compute_eval_t_plus_k_indices(
-                        context_length=H,
-                        pred_step=pred_step,
-                        action_horizon=action_horizon,
-                        device=device,
-                    )
+                    ctx_idx = torch.arange(H, device=device, dtype=torch.long) * pred_step
                     t = int(ctx_idx[-1].item())
                     future_len = sample_future_action_window(
                         action_horizon=action_horizon,
                         future_action_steps_train=future_action_steps_train,
                     )
+                    target_idx = t + future_len + 1
                     input_front_embd_eval = gt_front_embd_eval.index_select(1, ctx_idx)
 
                     gt_wrist_embd_eval = eval_data['cam_rs_embd'].to(device)
@@ -920,14 +916,14 @@ def main():
                         all_acs, action_min, action_max, q02=action_q02, q98=action_q98
                     )
 
-                    # Action tokens aligned to each context step start.
-                    acs = _build_action_tokens_from_raw(all_acs, ctx_idx, pred_step=pred_step, mode=action_agg)
+                    # Action tokens aligned to each context step index.
+                    acs = all_acs.index_select(1, ctx_idx)
 
                     gt_states_eval = eval_data['state'][[0]].to(device)
                     input_states_eval = normalize_states(
                         gt_states_eval, state_min, state_max, q02=state_q02, q98=state_q98
                     ).index_select(1, ctx_idx)
-                    future_actions = all_acs[:, t:t + future_len]
+                    future_actions = all_acs[:, t + 1:t + 1 + future_len]
                     pred_front, pred_wrist, pred_state, _ = transition(
                         input_front_embd_eval,
                         input_wrist_embd_eval,
@@ -1015,7 +1011,8 @@ def main():
 
     if is_rank0:
         plt.legend()
-        plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
 
     best_eval_val = best_eval.item() if hasattr(best_eval, 'item') else best_eval
     print(f"\nTraining complete. Best eval loss: {best_eval_val:.4f}")
