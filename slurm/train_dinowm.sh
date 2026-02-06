@@ -2,7 +2,7 @@
 #SBATCH --job-name=dino_wm
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
-#SBATCH --ntasks-per-node=4
+#SBATCH --ntasks-per-node=1
 #SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=64G
@@ -73,7 +73,7 @@ echo "Command: ${STATS_CMD} && ${TRAIN_CMD}"
 echo ""
 
 set +e
-srun --ntasks=4 --gpus-per-task=1 --cpu-bind=cores \
+srun --ntasks=1 --gpus-per-task=4 --cpu-bind=cores \
 apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \
@@ -82,6 +82,7 @@ apptainer exec --nv \
     "${container}" \
     bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
         export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
+        export CUDA_VISIBLE_DEVICES=0,1,2,3 && \
         if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"torchmetrics\") else 1)'; then \
             ${INSTALL_TORCHMETRICS_CMD}; \
         fi && ${STATS_CMD} && ${TRAIN_CMD}"
