@@ -28,8 +28,8 @@ save_every: 1000
 # World Model / Decoder
 dino_version: "v3"
 dino_assets:
-  decoder_checkpoint_dir: dino3_decoder_checkpoints
-  wm_checkpoint_dir: dino3_wm_checkpoints
+  decoder_checkpoint_dir: /scratch/u6cr/pravsels.u6cr/latent_safety/dino3_decoder_checkpoints
+  wm_checkpoint_dir: /scratch/u6cr/pravsels.u6cr/latent_safety/dino3_wm_checkpoints
 
 # Resume behavior
 auto_resume: true
