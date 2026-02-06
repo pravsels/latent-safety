@@ -24,7 +24,7 @@ data_dir="${scratch_dir}/latent_safety"
 container="${data_dir}/container/latent_safety_arm64.sif"
 PYTHON_EXT_DIR="${data_dir}/python_packages"
 HF_CACHE="${scratch_dir}/huggingface_cache"
-WANDB_DIR="${data_dir}/wandb"
+WANDB_DIR="${data_dir}"
 WANDB_CACHE_DIR="${data_dir}/wandb_cache"
 WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 
