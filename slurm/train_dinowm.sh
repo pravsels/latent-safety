@@ -31,8 +31,6 @@ WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 # Training config
 HDF5_FILE="${data_dir}/arx5_datasets_6Feb_26.h5"
 STATS_FILE="${data_dir}/arx5_datasets_6Feb_26_stats.json"
-CHECKPOINT_DIR="${data_dir}/dino_wm_checkpoints"
-DECODER_CHECKPOINT="${data_dir}/dino_decoder_checkpoints/testing_decoder.pth"
 CONFIG_FILE="configs/wm_config.yaml"
 CONFIG_PATH="${repo_dir}/${CONFIG_FILE}"
 
@@ -54,18 +52,19 @@ echo "Node: ${SLURM_NODELIST}"
 echo "Started (UTC): ${start_time}"
 echo "===================================="
 
-# Step 1: Generate dataset stats if they don't exist
-STATS_CMD="if [ ! -f ${STATS_FILE} ]; then \
-    python scripts/compute_stats_json.py --file ${HDF5_FILE} --output ${STATS_FILE}; \
-    else echo 'Stats file already exists: ${STATS_FILE}'; fi"
+# Step 1: Generate dataset stats once (rank 0), then wait for file.
+STATS_CMD="if [ \"\${SLURM_PROCID:-0}\" = \"0\" ]; then \
+    if [ ! -f ${STATS_FILE} ]; then \
+        python scripts/compute_stats_json.py --file ${HDF5_FILE} --output ${STATS_FILE}; \
+    else echo 'Stats file already exists: ${STATS_FILE}'; fi; \
+fi; \
+while [ ! -f ${STATS_FILE} ]; do sleep 2; done"
 
 # Step 2: Training command
 TRAIN_CMD="python dino_wm/train_dino_wm.py \
     --config ${CONFIG_FILE} \
     --hdf5-file ${HDF5_FILE} \
     --dataset-stats ${STATS_FILE} \
-    --checkpoint-dir ${CHECKPOINT_DIR} \
-    --decoder-checkpoint ${DECODER_CHECKPOINT} \
     --auto-resume"
 
 INSTALL_TORCHMETRICS_CMD="python -m pip install --upgrade --no-deps --target ${PYTHON_EXT_DIR} torchmetrics lightning-utilities packaging"
