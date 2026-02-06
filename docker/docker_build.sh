@@ -20,11 +20,18 @@ cp -r "$DINOV3_DIR" "$BUILD_DIR/dinov3"
 cp "$SCRIPT_DIR/Dockerfile" "$BUILD_DIR/"
 [ -f "$SCRIPT_DIR/.dockerignore" ] && cp "$SCRIPT_DIR/.dockerignore" "$BUILD_DIR/"
 
-docker buildx build \
-    --platform "linux/${PLATFORM}" \
-    -t "$IMAGE_NAME" \
-    --load \
-    -f "$BUILD_DIR/Dockerfile" \
-    "$BUILD_DIR"
+if [ "$PLATFORM" = "arm64" ]; then
+    docker buildx build \
+        --platform "linux/${PLATFORM}" \
+        -t "$IMAGE_NAME" \
+        --load \
+        -f "$BUILD_DIR/Dockerfile" \
+        "$BUILD_DIR"
+else
+    docker build \
+        -t "$IMAGE_NAME" \
+        -f "$BUILD_DIR/Dockerfile" \
+        "$BUILD_DIR"
+fi
 
 echo "Built: $IMAGE_NAME"

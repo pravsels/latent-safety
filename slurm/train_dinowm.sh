@@ -29,8 +29,8 @@ WANDB_CACHE_DIR="${data_dir}/wandb_cache"
 WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 
 # Training config
-HDF5_FILE="${data_dir}/arx5_datasets_new.h5"
-STATS_FILE="${data_dir}/arx5_datasets_new_stats.json"
+HDF5_FILE="${data_dir}/arx5_datasets_6Feb_26.h5"
+STATS_FILE="${data_dir}/arx5_datasets_6Feb_26_stats.json"
 CHECKPOINT_DIR="${data_dir}/dino_wm_checkpoints"
 DECODER_CHECKPOINT="${data_dir}/dino_decoder_checkpoints/testing_decoder.pth"
 CONFIG_FILE="configs/wm_config.yaml"

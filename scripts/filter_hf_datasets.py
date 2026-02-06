@@ -4,9 +4,7 @@ Script to filter Hugging Face datasets by robot_type.
 
 Filters:
 - Only v2.1+ format datasets (rejects v2.0 and v1.6 formats)
-  - v2.1+ has per-episode stats (meta/episodes_stats.jsonl)
-  - v2.0 has global stats only (rejected)
-  - v1.6 uses old format (rejected)
+  - Uses dataset metadata (RoboCandyWrapper for v2.1) to read codebase_version
 - For "arx5", checks camera data to ensure single-arm setup:
   - Has observation.images.front
   - Has observation.images.wrist
@@ -24,8 +22,15 @@ Sample Usage:
 """
 
 import json
-from typing import List
-from huggingface_hub import list_datasets, HfApi
+from typing import List, Optional, Set
+import packaging.version
+from huggingface_hub import list_datasets
+from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+from lerobot.datasets.backward_compatibility import BackwardCompatibilityError
+try:
+    from robocandywrapper.dataformats.lerobot_21 import LeRobot21DatasetMetadata
+except ImportError:
+    LeRobot21DatasetMetadata = None
 
 
 def _is_single_arm_arx5(has_front: bool, has_wrist: bool, has_left_wrist: bool, has_right_wrist: bool, verbose: bool = False) -> bool:
@@ -37,45 +42,53 @@ def _is_single_arm_arx5(has_front: bool, has_wrist: bool, has_left_wrist: bool, 
     return False
 
 
-def _check_dataset_version(siblings: List[str], verbose: bool = False) -> bool:
-    """
-    Check if dataset is in v2.1+ format (not v2.0 or v1.6).
-    
-    Key difference between v2.0 and v2.1:
-    - v2.1+ has meta/episodes_stats.jsonl (per-episode stats)
-    - v2.0 has meta/stats.json (global stats) but NO episodes_stats.jsonl
-    
-    v2.1+ datasets:
-    - Have data/chunk-*/episode_*.parquet 
-    - Have meta/episodes_stats.jsonl (per-episode stats)
-    
-    v2.0 datasets (REJECTED):
-    - Have data/chunk-*/episode_*.parquet
-    - Have meta/stats.json but NOT meta/episodes_stats.jsonl
-    
-    v1.6 datasets (REJECTED):
-    - Have data/train-*.parquet
-    - Use meta_data/ directory
-    """
-    # Check for v2.1+ indicator: per-episode stats
-    has_chunk_episodes = any('data/chunk-' in s and 'episode_' in s and '.parquet' in s for s in siblings)
-    has_episodes_stats = any('meta/episodes_stats.jsonl' in s for s in siblings)
-    
-    # Check for v1.6 indicators
-    has_meta_data_dir = any(s.startswith('meta_data/') for s in siblings)
-    
-    # v2.1+ MUST have episodes_stats.jsonl
-    is_v21_plus = has_chunk_episodes and has_episodes_stats and not has_meta_data_dir
-    
-    if verbose:
-        print(f"    Version check: chunk_episodes={has_chunk_episodes}, episodes_stats.jsonl={has_episodes_stats}, v2.1+={is_v21_plus}")
-    
-    return is_v21_plus
+def _is_supported_version_str(version: Optional[str]) -> bool:
+    if not version:
+        return False
+    try:
+        parsed = packaging.version.parse(str(version))
+    except packaging.version.InvalidVersion:
+        return False
+    return parsed >= packaging.version.parse("2.1")
+
+
+def _get_codebase_version(meta) -> Optional[str]:
+    version = getattr(meta, "codebase_version", None)
+    if version is None and hasattr(meta, "info"):
+        version = meta.info.get("codebase_version")
+    return version
+
+
+def _load_metadata(repo_id: str):
+    if LeRobot21DatasetMetadata is None:
+        raise RuntimeError(
+            "RoboCandyWrapper is required for LeRobot v2.1 metadata."
+        )
+    try:
+        meta = LeRobotDatasetMetadata(repo_id)
+        version = _get_codebase_version(meta)
+        if version is None or packaging.version.parse(str(version)) < packaging.version.parse("3.0"):
+            meta = LeRobot21DatasetMetadata(repo_id)
+        return meta
+    except (BackwardCompatibilityError, NotImplementedError, FileNotFoundError, ValueError):
+        return LeRobot21DatasetMetadata(repo_id)
+
+
+def _camera_keys(meta) -> Set[str]:
+    return set(getattr(meta, "camera_keys", []))
+
+
+def _has_token(camera_keys: Set[str], tokens: List[str]) -> bool:
+    for key in camera_keys:
+        for token in tokens:
+            if token in key:
+                return True
+    return False
 
 
 def check_robot_type(dataset_id: str, target_robot_type: str = "arx5", verbose: bool = False) -> bool:
     """
-    Check if dataset matches target robot_type by checking repo file structure.
+    Check if dataset matches target robot_type by checking dataset metadata.
     
     Filters out v2.0 and v1.6 datasets (only accepts v2.1+).
     
@@ -89,30 +102,19 @@ def check_robot_type(dataset_id: str, target_robot_type: str = "arx5", verbose: 
     """
     target_lower = target_robot_type.lower()
     
-    # Check the repo file structure directly for video directories
     try:
-        api = HfApi()
-        dataset_info = api.dataset_info(dataset_id)
-        
-        if not hasattr(dataset_info, 'siblings'):
+        meta = _load_metadata(dataset_id)
+        version = _get_codebase_version(meta)
+        if not _is_supported_version_str(version):
             if verbose:
-                print("    No siblings found in repo")
+                print(f"    Rejected: unsupported version {version}")
             return False
-        
-        siblings = [s.rfilename for s in dataset_info.siblings]
-        
-        # Check version first
-        is_v21_plus = _check_dataset_version(siblings, verbose)
-        if not is_v21_plus:
-            if verbose:
-                print("    Rejected: not v2.1+ format")
-            return False
-        
-        # Check if observation.images.* directories exist
-        has_front = any('observation.images.front' in s for s in siblings)
-        has_wrist = any('observation.images.wrist' in s for s in siblings)
-        has_left_wrist = any('observation.images.left_wrist' in s for s in siblings)
-        has_right_wrist = any('observation.images.right_wrist' in s for s in siblings)
+
+        camera_keys = _camera_keys(meta)
+        has_front = _has_token(camera_keys, ["observation.images.front", "front"])
+        has_wrist = _has_token(camera_keys, ["observation.images.wrist", "wrist", "eye_in_hand"])
+        has_left_wrist = _has_token(camera_keys, ["observation.images.left_wrist", "left_wrist", "left-wrist"])
+        has_right_wrist = _has_token(camera_keys, ["observation.images.right_wrist", "right_wrist", "right-wrist"])
         
         if verbose:
             print(f"    Video dirs: front={has_front}, wrist={has_wrist}, left_wrist={has_left_wrist}, right_wrist={has_right_wrist}")

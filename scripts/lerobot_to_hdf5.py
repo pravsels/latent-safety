@@ -55,6 +55,78 @@ def signal_handler(signum, frame):
 
 # --- Worker Process ---
 
+def _get_episode_range(dataset, ep_idx: int) -> Tuple[int, int]:
+    """Return (start_idx, end_idx) for an episode across v2.1/v3 datasets."""
+    if hasattr(dataset, "episode_data_index"):
+        start_idx = dataset.episode_data_index["from"][ep_idx].item()
+        end_idx = dataset.episode_data_index["to"][ep_idx].item()
+        return int(start_idx), int(end_idx)
+
+    if hasattr(dataset, "meta") and hasattr(dataset.meta, "episodes"):
+        episodes_meta = dataset.meta.episodes
+        if isinstance(episodes_meta, dict):
+            ep_info = episodes_meta.get(ep_idx)
+        else:
+            if ep_idx >= len(episodes_meta):
+                raise IndexError(f"Episode index {ep_idx} out of range")
+            ep_info = episodes_meta[ep_idx]
+        if not ep_info:
+            raise KeyError(f"Episode metadata missing for index {ep_idx}")
+        start_idx = ep_info.get("dataset_from_index")
+        end_idx = ep_info.get("dataset_to_index")
+        if start_idx is None or end_idx is None:
+            raise KeyError("Episode metadata missing dataset_from_index/dataset_to_index")
+        return int(start_idx), int(end_idx)
+
+    raise AttributeError("Dataset missing episode index metadata")
+
+
+def _get_num_episodes(dataset) -> int:
+    num_episodes = getattr(dataset, "num_episodes", None)
+    if num_episodes is not None:
+        return int(num_episodes)
+    if hasattr(dataset, "episode_data_index"):
+        return int(len(dataset.episode_data_index["from"]))
+    if hasattr(dataset, "meta") and hasattr(dataset.meta, "total_episodes"):
+        return int(dataset.meta.total_episodes)
+    if hasattr(dataset, "meta") and hasattr(dataset.meta, "episodes"):
+        return int(len(dataset.meta.episodes))
+    raise AttributeError("Dataset missing episode count metadata")
+
+
+def _is_numeric_dtype(dtype: Optional[str]) -> bool:
+    if not dtype:
+        return False
+    return dtype.startswith("float") or dtype.startswith("int") or dtype in {"uint8", "bool"}
+
+
+def _select_batch_key(batch: dict, candidates: List[str], meta_features: Optional[dict] = None) -> Optional[str]:
+    for key in candidates:
+        if key in batch:
+            if meta_features:
+                dtype = meta_features.get(key, {}).get("dtype")
+                if not _is_numeric_dtype(dtype):
+                    continue
+            return key
+    return None
+
+
+def _to_tensor_batch(data):
+    if isinstance(data, list):
+        cleaned = []
+        for item in data:
+            if isinstance(item, torch.Tensor):
+                if item.is_sparse:
+                    item = item.to_dense()
+                cleaned.append(item)
+            else:
+                cleaned.append(torch.tensor(item))
+        return torch.stack(cleaned)
+    if isinstance(data, np.ndarray):
+        return data
+    return data
+
+
 def data_generator(
     dataset,
     episode_indices: List[int],
@@ -71,8 +143,7 @@ def data_generator(
                 
             try:
                 # Get episode range
-                start_idx = dataset.episode_data_index["from"][ep_idx].item()
-                end_idx = dataset.episode_data_index["to"][ep_idx].item()
+                start_idx, end_idx = _get_episode_range(dataset, ep_idx)
                 total_frames = end_idx - start_idx
                 
                 if total_frames < min_length:
@@ -139,8 +210,12 @@ def process_dataset_object(
 ) -> int:
     
     print(f"\nLoading dataset metadata: {dataset_id}")
-    required_attrs = ["episode_data_index", "hf_dataset", "meta", "_query_videos"]
+    required_attrs = ["hf_dataset", "meta", "_query_videos"]
     missing_attrs = [attr for attr in required_attrs if not hasattr(dataset, attr)]
+    if not hasattr(dataset, "episode_data_index") and not (
+        hasattr(dataset, "meta") and hasattr(dataset.meta, "episodes")
+    ):
+        missing_attrs.append("episode_data_index_or_meta.episodes")
     if missing_attrs:
         print(
             f"❌ Dataset missing required attributes {missing_attrs}. "
@@ -148,9 +223,7 @@ def process_dataset_object(
         )
         return start_traj_idx
 
-    num_episodes = getattr(dataset, "num_episodes", None)
-    if num_episodes is None:
-        num_episodes = int(len(dataset.episode_data_index["from"]))
+    num_episodes = _get_num_episodes(dataset)
     if max_episodes is not None:
         num_episodes = min(num_episodes, max_episodes)
     
@@ -222,15 +295,24 @@ def process_dataset_object(
                 chunk_start = start_idx + i
                 chunk_end = min(start_idx + i + batch_size, end_idx)
                 
-                # Load Chunk
-                batch = dataset_ref.hf_dataset[chunk_start:chunk_end]
+                # Load Chunk (avoid auto torch formatting that breaks on string fields)
+                batch = dataset_ref.hf_dataset.with_format("numpy")[chunk_start:chunk_end]
                 
                 # Get Timestamps for video query
                 ts_raw = batch["timestamp"]
-                batch_timestamps = [t.item() if isinstance(t, torch.Tensor) else t for t in ts_raw]
+                batch_timestamps = [
+                    np.float64(t.item()) if isinstance(t, torch.Tensor) else np.float64(t)
+                    for t in ts_raw
+                ]
                 
                 query = {k: batch_timestamps for k in dataset_ref.meta.video_keys}
-                video_frames = dataset_ref._query_videos(query, ep_idx)
+                # Ensure LeRobot video query uses float64 timestamps for cdist
+                orig_default_dtype = torch.get_default_dtype()
+                torch.set_default_dtype(torch.float64)
+                try:
+                    video_frames = dataset_ref._query_videos(query, ep_idx)
+                finally:
+                    torch.set_default_dtype(orig_default_dtype)
                 
                 # --- Handle Wrist ---
                 if "observation.images.wrist" in video_frames:
@@ -269,34 +351,41 @@ def process_dataset_object(
                 del w_mini, f_mini, w_prep, f_prep, video_frames
                 
                 # --- Handle Non-Video Data (Actions/States) ---
-                act = batch["action"]
-                if isinstance(act, list):
-                    cleaned_act = []
-                    for a in act:
-                        if isinstance(a, torch.Tensor):
-                            if a.is_sparse:
-                                a = a.to_dense()
-                            cleaned_act.append(a)
-                        else:
-                            cleaned_act.append(torch.tensor(a))
-                    act = torch.stack(cleaned_act)
-                act_np = act.numpy()
+                action_key = _select_batch_key(
+                    batch,
+                    [
+                        "action",
+                        "action.pos",
+                        "action.position",
+                        "action.eef_pose",
+                        "action.velocity",
+                        "action.effort",
+                    ],
+                    getattr(dataset_ref.meta, "features", None),
+                )
+                if action_key is None:
+                    raise KeyError("Missing action key in batch")
+                act = _to_tensor_batch(batch[action_key])
+                act_np = act if isinstance(act, np.ndarray) else act.numpy()
             
                 # States
                 st_np = None
-                if "observation.state" in batch:
-                    st = batch["observation.state"]
-                    if isinstance(st, list):
-                        cleaned_st = []
-                        for s in st:
-                            if isinstance(s, torch.Tensor):
-                                if s.is_sparse:
-                                    s = s.to_dense()
-                                cleaned_st.append(s)
-                            else:
-                                cleaned_st.append(torch.tensor(s))
-                        st = torch.stack(cleaned_st)
-                    st_np = st.numpy()
+                state_key = _select_batch_key(
+                    batch,
+                    [
+                        "observation.state",
+                        "observation.state.pos",
+                        "observation.state.eef_pose",
+                        "observation.state.velocity",
+                        "observation.state.effort",
+                    ],
+                    getattr(dataset_ref.meta, "features", None),
+                )
+                if state_key is not None:
+                    st = _to_tensor_batch(batch[state_key])
+                    st_np = st if isinstance(st, np.ndarray) else st.numpy()
+                if st_np is None:
+                    raise ValueError("Missing observation.state; actions_delta is required.")
 
                 # --- Write to HDF5 (Incremental) ---
                 if not datasets_initialized:
@@ -536,21 +625,26 @@ def main():
                     if not valid_repo_ids:
                         print("❌ No repos matched required camera keys. Aborting.")
                         return
-                    print(f"🍬 Loading RoboCandyWrapper dataset for {len(valid_repo_ids)} repos...")
-                    wrapped_dataset = make_dataset_without_config(
-                        valid_repo_ids, use_imagenet_stats=False
-                    )
-                    traj_counter = process_wrapped_dataset(
-                        wrapped_dataset=wrapped_dataset,
-                        hdf_file=hf_out,
-                        dino_model=dino_model,
-                        device=device,
-                        batch_size=args.batch_size,
-                        max_episodes=args.max_episodes_per_dataset,
-                        start_traj_idx=traj_counter,
-                        min_length=2,
-                        resume=(mode == "a"),
-                    )
+                    print(f"🍬 Processing {len(valid_repo_ids)} RoboCandyWrapper repos (one at a time)...")
+                    for repo_id in valid_repo_ids:
+                        if SHUTDOWN_REQUESTED:
+                            print("\n🛑 Shutdown complete. File has been properly closed.")
+                            break
+                        print(f"🍬 Loading RoboCandyWrapper dataset for {repo_id}...")
+                        wrapped_dataset = make_dataset_without_config(
+                            [repo_id], use_imagenet_stats=False
+                        )
+                        traj_counter = process_wrapped_dataset(
+                            wrapped_dataset=wrapped_dataset,
+                            hdf_file=hf_out,
+                            dino_model=dino_model,
+                            device=device,
+                            batch_size=args.batch_size,
+                            max_episodes=args.max_episodes_per_dataset,
+                            start_traj_idx=traj_counter,
+                            min_length=2,
+                            resume=(mode == "a"),
+                        )
         
         # Final flush
         hf_out.flush()

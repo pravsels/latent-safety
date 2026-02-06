@@ -85,14 +85,10 @@ def compute_stats(hdf5_path, output_json):
         keys = [k for k in f.keys() if k.startswith('trajectory_')]
         
         for key in tqdm(keys, desc="Scanning Dataset"):
-            # --- Actions (prefer actions_delta) ---
-            if 'actions_delta' in f[key]:
-                acs = f[key]['actions_delta'][:]
-            else:
-                if 'actions' not in f[key]:
-                    raise KeyError(f"Missing actions/actions_delta in {key}")
-                print("⚠️  Warning: actions_delta missing; falling back to actions.")
-                acs = f[key]['actions'][:]
+            # --- Actions (require actions_delta) ---
+            if 'actions_delta' not in f[key]:
+                raise KeyError(f"Missing actions_delta in {key}")
+            acs = f[key]['actions_delta'][:]
             # Flatten time dimension for stats: (T, D) -> D
             # Actually, we want stats per dimension across all time steps
             
@@ -139,7 +135,7 @@ def compute_stats(hdf5_path, output_json):
     # Final Calculations
     stats = {}
     
-    # Actions (actions_delta)
+    # Actions (actions_delta required)
     if action_count > 0:
         stats["action_min"] = action_min
         stats["action_max"] = action_max

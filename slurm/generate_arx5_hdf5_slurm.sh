@@ -25,8 +25,8 @@ WANDB_CONFIG_DIR="${scratch_dir}/wandb_config"
 HF_TOKEN_FILE="${home_dir}/.hf_token"
 
 # Input/Output config
-DATASETS_LIST="${scratch_dir}/arx5_datasets_new.json"
-OUTPUT_HDF5="${scratch_dir}/arx5_datasets_new.h5"
+DATASETS_LIST="${scratch_dir}/arx5_datasets_6Feb_26.json"
+OUTPUT_HDF5="${scratch_dir}/arx5_datasets_6Feb_26.h5"
 BATCH_SIZE=256
 
 mkdir -p "${scratch_dir}" "${HF_CACHE}" "${PYTHON_PACKAGES}" \

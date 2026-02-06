@@ -51,10 +51,19 @@ def preprocess_images_for_dino(images: torch.Tensor, is_front_camera: bool) -> t
 
 def to_hwc_uint8(images: torch.Tensor) -> np.ndarray:
     """
-    Convert batch of [B, 3, H, W] float (0-1) tensors to [B, H, W, 3] uint8 numpy.
+    Convert batch of float tensors to [B, H, W, 3] uint8 numpy.
+    Accepts [B, 3, H, W], [B, H, W, 3], or single-frame [H, W, 3]/[3, H, W].
     """
-    # Permute to HWC
-    images = images.permute(0, 2, 3, 1).cpu().numpy()
-    # Clip and Scale
+    if images.ndim == 3:
+        images = images.unsqueeze(0)
+
+    if images.ndim != 4:
+        raise ValueError(f"Expected 4D tensor for images, got shape {tuple(images.shape)}")
+
+    # If channel-first, permute to HWC
+    if images.shape[1] == 3:
+        images = images.permute(0, 2, 3, 1)
+
+    images = images.cpu().numpy()
     images = (np.clip(images, 0, 1) * 255).astype(np.uint8)
     return images

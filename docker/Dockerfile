@@ -32,7 +32,8 @@ WORKDIR /workspace
 # Install PyTorch, wandb, lerobot and pinned dependencies
 RUN set -eux; \
     python -m pip install -v torch==2.6 torchvision --index-url https://download.pytorch.org/whl/cu126 && \
-    python -m pip install -v wandb lerobot==0.3.3 "numpy==1.26.4" "gymnasium==0.28.1" torchmetrics lightning-utilities timm scipy
+    python -m pip install -v "lerobot>=0.4.3" robocandywrapper && \
+    python -m pip install -v --no-deps wandb "numpy==1.26.4" torchmetrics lightning-utilities timm scipy
 
 # Copy packages (copied to build context by docker_build.sh)
 COPY dinov3 /workspace/dinov3
