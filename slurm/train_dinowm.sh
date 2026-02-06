@@ -34,8 +34,7 @@ STATS_FILE="${data_dir}/arx5_datasets_6Feb_26_stats.json"
 CONFIG_FILE="configs/wm_config.yaml"
 CONFIG_PATH="${repo_dir}/${CONFIG_FILE}"
 
-mkdir -p "${CHECKPOINT_DIR}" "${PYTHON_EXT_DIR}" "${HF_CACHE}" \
-  "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
+mkdir -p "${PYTHON_EXT_DIR}" "${HF_CACHE}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
 
 # Ensure repo weights path points to scratch weights for relative lookups
 if [ -L "${repo_dir}/weights" ] || [ ! -e "${repo_dir}/weights" ]; then
