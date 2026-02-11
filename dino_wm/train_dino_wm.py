@@ -187,6 +187,20 @@ def _compute_lr_factor(
     return float(min_lr_factor) + (1.0 - float(min_lr_factor)) * cosine
 
 
+def build_wm_optimizer(transition_module: nn.Module) -> AdamW:
+    return AdamW([
+        {'params': transition_module.transformer.parameters(), 'lr': 5e-5},
+        {'params': transition_module.state_head.parameters(), 'lr': 5e-5},
+        {'params': transition_module.front_head.parameters(), 'lr': 5e-5},
+        {'params': transition_module.wrist_head.parameters(), 'lr': 5e-5},
+        {'params': transition_module.action_encoder.parameters(), 'lr': 5e-4},
+        {'params': transition_module.state_encoder.parameters(), 'lr': 5e-4},
+        {'params': transition_module.trajectory_encoder.parameters(), 'lr': 5e-4},
+        {'params': [transition_module.pos_embedding], 'lr': 5e-4},
+        {'params': [transition_module.temp_embedding], 'lr': 5e-4}
+    ])
+
+
 
 def compute_action_horizon_indices(
     *,
@@ -678,16 +692,7 @@ def main():
     transition.train()
 
     # Optimizer
-    optimizer = AdamW([
-        {'params': transition_module.transformer.parameters(), 'lr': 5e-5},
-        {'params': transition_module.state_head.parameters(), 'lr': 5e-5},
-        {'params': transition_module.front_head.parameters(), 'lr': 5e-5},
-        {'params': transition_module.wrist_head.parameters(), 'lr': 5e-5},
-        {'params': transition_module.action_encoder.parameters(), 'lr': 5e-4},
-        {'params': transition_module.state_encoder.parameters(), 'lr': 5e-4},
-        {'params': [transition_module.pos_embedding], 'lr': 5e-4},
-        {'params': [transition_module.temp_embedding], 'lr': 5e-4}
-    ])
+    optimizer = build_wm_optimizer(transition_module)
     base_lrs = [pg['lr'] for pg in optimizer.param_groups]
 
     # Load best_eval from existing best checkpoint to persist across sessions
