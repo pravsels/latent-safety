@@ -11,6 +11,7 @@ import json
 import h5py
 import torch
 from torch import nn
+from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
@@ -130,6 +131,32 @@ def build_train_loader(
         sampler = None
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     return loader, sampler
+
+
+def build_wm_optimizer(transition_module: nn.Module) -> AdamW:
+    """Build the standard optimizer used by DINO/WAN world-model trainers."""
+    return AdamW(
+        [
+            # VideoTransformer and prediction heads
+            {"params": transition_module.transformer.parameters(), "lr": 5e-5},
+            {"params": transition_module.state_head.parameters(), "lr": 5e-5},
+            {"params": transition_module.front_head.parameters(), "lr": 5e-5},
+            {"params": transition_module.wrist_head.parameters(), "lr": 5e-5},
+            # Action/state encoders and trajectory summary encoder
+            {"params": transition_module.action_encoder.parameters(), "lr": 5e-4},
+            {"params": transition_module.state_encoder.parameters(), "lr": 5e-4},
+            {"params": transition_module.trajectory_encoder.parameters(), "lr": 5e-4},
+            # Positional and temporal embeddings
+            {"params": [transition_module.pos_embedding], "lr": 5e-4},
+            {"params": [transition_module.temp_embedding], "lr": 5e-4},
+        ]
+    )
+
+
+def freeze_failure_head_for_wm_training(transition_module: nn.Module) -> None:
+    """Freeze failure head params during WM training (classifier trains it separately)."""
+    for p in transition_module.failure_head.parameters():
+        p.requires_grad = False
 
 
 def compute_lr_factor(

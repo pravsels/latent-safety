@@ -30,7 +30,6 @@ import torch.nn.functional as F
 import wandb
 from einops import rearrange
 from torch.nn.parallel import DistributedDataParallel
-from torch.optim import AdamW
 
 # Ensure repo root import works when executed as a script.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -41,8 +40,10 @@ from dino_wm.dino_models import VideoTransformer, normalize_acs, normalize_state
 from dino_wm.checkpoint_utils import filter_state_dict_by_shape
 from dino_wm.config import DECODER_CONFIG, MODEL_CONFIG
 from dino_wm.train_wm_common import (
+    build_wm_optimizer,
     build_split_datasets,
     build_train_loader,
+    freeze_failure_head_for_wm_training,
     init_distributed_from_env,
     load_stats_tensors,
     load_yaml_config,
@@ -340,21 +341,13 @@ def main(argv=None):
     if is_distributed:
         transition = DistributedDataParallel(transition, device_ids=[local_rank])
     transition_module = transition.module if is_distributed else transition
+
+    # failure_head is trained separately by classifier scripts.
+    freeze_failure_head_for_wm_training(transition_module)
+
     transition.train()
 
-    optimizer = AdamW(
-        [
-            {"params": transition_module.transformer.parameters(), "lr": 5e-5},
-            {"params": transition_module.state_head.parameters(), "lr": 5e-5},
-            {"params": transition_module.front_head.parameters(), "lr": 5e-5},
-            {"params": transition_module.wrist_head.parameters(), "lr": 5e-5},
-            {"params": transition_module.action_encoder.parameters(), "lr": 5e-4},
-            {"params": transition_module.trajectory_encoder.parameters(), "lr": 5e-4},
-            {"params": transition_module.state_encoder.parameters(), "lr": 5e-4},
-            {"params": [transition_module.pos_embedding], "lr": 5e-4},
-            {"params": [transition_module.temp_embedding], "lr": 5e-4},
-        ]
-    )
+    optimizer = build_wm_optimizer(transition_module)
     base_lrs = [pg["lr"] for pg in optimizer.param_groups]
 
     best_eval = float("inf")
