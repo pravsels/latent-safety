@@ -45,6 +45,46 @@ from dino_wm.checkpoint_utils import filter_state_dict_by_shape
 from dino_wm.config import MODEL_CONFIG, TRAIN_CONFIG, DECODER_CONFIG, get_dino_config, get_decoder_image_size
 
 
+def _resolve_wm_checkpoint(checkpoint_dir: str) -> str | None:
+    """
+    Pick the most appropriate WM checkpoint from a directory.
+
+    Preference order:
+    1) best_wm.pth
+    2) latest_wm.pth (preemption-safe rich dict)
+    3) highest wm_iter{N}.pth (rich dict checkpoints)
+    """
+    try:
+        best_path = os.path.join(checkpoint_dir, "best_wm.pth")
+        if os.path.exists(best_path):
+            return best_path
+
+        latest_path = os.path.join(checkpoint_dir, "latest_wm.pth")
+        if os.path.exists(latest_path):
+            return latest_path
+
+        if not os.path.isdir(checkpoint_dir):
+            return None
+
+        best_iter = None
+        best_path = None
+        for name in os.listdir(checkpoint_dir):
+            # expected: wm_iter2000.pth
+            if not (name.startswith("wm_iter") and name.endswith(".pth")):
+                continue
+            mid = name[len("wm_iter") : -len(".pth")]
+            if not mid.isdigit():
+                continue
+            it = int(mid)
+            if best_iter is None or it > best_iter:
+                best_iter = it
+                best_path = os.path.join(checkpoint_dir, name)
+        return best_path
+    except Exception:
+        # Never crash due to checkpoint directory issues; caller will handle None.
+        return None
+
+
 def _global_grad_norm(parameters, norm_type: float = 2.0) -> float:
     """Compute global grad norm over a set of parameters."""
     grads = [p.grad.detach() for p in parameters if p.grad is not None]
@@ -237,10 +277,11 @@ def parse_args(argv=None):
                 os.path.join(dino_assets["decoder_checkpoint_dir"], "best_decoder.pth"),
             )
         if "wm_checkpoint_dir" in dino_assets:
-            cfg.setdefault(
-                "resume_checkpoint",
-                os.path.join(dino_assets["wm_checkpoint_dir"], "best_wm.pth"),
-            )
+            # Do not implicitly set resume_checkpoint here.
+            # Resume selection is handled in main() so it can:
+            # - prefer best_wm.pth when it exists
+            # - fall back to latest_wm.pth / highest wm_iter*.pth
+            # - avoid crashing when best_wm.pth hasn't been created yet
             cfg.setdefault("checkpoint_dir", dino_assets["wm_checkpoint_dir"])
 
     parser = argparse.ArgumentParser(
@@ -661,8 +702,46 @@ def main():
 
     # Resume logic
     resume_path = args.resume_checkpoint
-    if resume_path is None and args.auto_resume and os.path.exists(latest_ckpt_path):
-        resume_path = latest_ckpt_path
+    if resume_path is not None and not os.path.exists(resume_path):
+        # Common pattern: configs point at best_wm.pth, but first run hasn't produced it yet.
+        # Instead of crashing, fall back to the best available checkpoint in the dir.
+        if os.path.basename(resume_path) == "best_wm.pth":
+            fallback = _resolve_wm_checkpoint(args.checkpoint_dir)
+            if fallback is not None:
+                print(
+                    f"Warning: requested '{resume_path}' not found; "
+                    f"falling back to '{fallback}'."
+                )
+                resume_path = fallback
+            else:
+                print(
+                    f"Warning: requested '{resume_path}' not found and no other checkpoints "
+                    f"exist in '{args.checkpoint_dir}'. Starting from scratch."
+                )
+                resume_path = None
+        elif args.auto_resume:
+            fallback = _resolve_wm_checkpoint(args.checkpoint_dir)
+            if fallback is not None:
+                print(
+                    f"Warning: requested '{resume_path}' not found; "
+                    f"auto-resume enabled, falling back to '{fallback}'."
+                )
+                resume_path = fallback
+            else:
+                print(
+                    f"Warning: requested '{resume_path}' not found and no checkpoints exist in "
+                    f"'{args.checkpoint_dir}'. Starting from scratch."
+                )
+                resume_path = None
+        else:
+            raise FileNotFoundError(
+                f"Resume checkpoint '{resume_path}' not found. "
+                f"Either point --resume-checkpoint to an existing file, or enable --auto-resume."
+            )
+
+    if resume_path is None and args.auto_resume:
+        # Auto-resume default: prefer best if it exists, else fall back to latest/highest-iter.
+        resume_path = _resolve_wm_checkpoint(args.checkpoint_dir)
 
     start_iter = args.start_iter
     if resume_path is not None:
