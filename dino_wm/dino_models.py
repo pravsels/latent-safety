@@ -14,7 +14,7 @@ from scipy.spatial.transform import Rotation
 from dino_wm.config import MODEL_CONFIG, get_dino_config
 
 def _load_action_horizon_from_config() -> int:
-    config_path = Path(__file__).resolve().parents[1] / "configs" / "wm_config.yaml"
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "dino_wm_config.yaml"
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
     import ruamel.yaml as ryaml
@@ -22,7 +22,7 @@ def _load_action_horizon_from_config() -> int:
     yaml = ryaml.YAML(typ="safe")
     cfg = yaml.load(config_path.read_text()) or {}
     if "action_horizon" not in cfg:
-        raise KeyError("wm_config.yaml missing required key: action_horizon")
+        raise KeyError("dino_wm_config.yaml missing required key: action_horizon")
     return int(cfg["action_horizon"])
 
 
@@ -344,18 +344,33 @@ class VideoTransformer(nn.Module):
         dropout: float = 0.,
         emb_dropout: float = 0.,
         device: str = 'cuda',
+        backbone: str = "dino",
         dino_version: str | None = None,
+        num_patches: int | None = None,
     ):
         super().__init__()
 
         self.device = device
-        dino_cfg = get_dino_config(dino_version)
-        if 'hub_source' in dino_cfg:
-            self.dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name'],
-                                       source=dino_cfg['hub_source'], weights=dino_cfg['weights_path']).to(device)
+        self.backbone = backbone
+        if backbone == "dino":
+            dino_cfg = get_dino_config(dino_version)
+            if 'hub_source' in dino_cfg:
+                self.dino = torch.hub.load(
+                    dino_cfg['hub_repo'],
+                    dino_cfg['model_name'],
+                    source=dino_cfg['hub_source'],
+                    weights=dino_cfg['weights_path'],
+                ).to(device)
+            else:
+                self.dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name']).to(device)
+            self.num_patches = int(dino_cfg['num_patches'])
+        elif backbone == "wan":
+            self.dino = None
+            if num_patches is None:
+                raise ValueError("num_patches is required when backbone='wan'")
+            self.num_patches = int(num_patches)
         else:
-            self.dino = torch.hub.load(dino_cfg['hub_repo'], dino_cfg['model_name']).to(device)
-        self.num_patches = dino_cfg['num_patches']
+            raise ValueError(f"Unknown backbone '{backbone}'. Expected one of ['dino', 'wan'].")
         
         if action_horizon != FUTURE_ACTION_HORIZON_MAX:
             raise ValueError(
@@ -561,6 +576,8 @@ class VideoTransformer(nn.Module):
     @torch.no_grad()
     def get_dino_features(self, video: torch.Tensor) -> torch.Tensor:
         """Extract DINO features from video frames."""
+        if self.backbone != "dino" or self.dino is None:
+            raise RuntimeError("get_dino_features() is only available when backbone='dino'.")
         b, f, c, h, w = video.shape
         video = video.view(b * f, c, h, w)
         features = self.dino.forward_features(video)['x_norm_patchtokens']

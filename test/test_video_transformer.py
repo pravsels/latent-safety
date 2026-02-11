@@ -184,3 +184,48 @@ def test_multihead_attention_rejects_bad_seq_len():
     x = torch.zeros(1, 10, 8)  # 10 not divisible by 4
     with pytest.raises(ValueError):
         attn(x)
+
+
+def test_video_transformer_wan_backbone_uses_provided_latent_shape(monkeypatch):
+    import dino_wm.dino_models as dino_models
+
+    def _fail_load(*args, **kwargs):
+        raise AssertionError("torch.hub.load should not be called for WAN backbone")
+
+    monkeypatch.setattr(torch.hub, "load", _fail_load)
+
+    model = dino_models.VideoTransformer(
+        image_size=(224, 224),
+        dim=16,
+        action_embed_dim=8,
+        state_embed_dim=6,
+        state_dim=5,
+        action_dim=4,
+        action_horizon=dino_models.FUTURE_ACTION_HORIZON_MAX,
+        trajectory_summary_dim=12,
+        depth=1,
+        heads=2,
+        mlp_dim=64,
+        num_frames=3,
+        device="cpu",
+        backbone="wan",
+        num_patches=64,
+    )
+
+    batch = 2
+    num_frames = 3
+    video1 = torch.zeros(batch, num_frames, 64, 16)
+    video2 = torch.zeros(batch, num_frames, 64, 16)
+    states = torch.zeros(batch, num_frames, 5)
+    actions = torch.zeros(batch, num_frames, 4)
+    future_actions = torch.zeros(batch, 7, 4)
+
+    pred1, pred2, state_preds, failure_preds = model(
+        video1, video2, states, actions, future_actions
+    )
+
+    assert model.num_patches == 64
+    assert pred1.shape == (batch, num_frames, 64, 16)
+    assert pred2.shape == (batch, num_frames, 64, 16)
+    assert state_preds.shape == (batch, num_frames, 5)
+    assert failure_preds.shape == (batch, num_frames, 1)

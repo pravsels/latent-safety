@@ -466,7 +466,7 @@ def main() -> int:
 
     # --- Load world model --------------------------------------------------
     print(f"Loading world model from {args.wm_checkpoint} …")
-    # action_horizon must match the value in wm_config.yaml (used at training time).
+    # action_horizon must match the value in dino_wm_config.yaml (used at training time).
     # The model pads shorter future-action tensors internally, so we can sweep
     # K < action_horizon freely.
     from dino_wm.dino_models import FUTURE_ACTION_HORIZON_MAX

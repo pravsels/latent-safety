@@ -4,7 +4,7 @@ from pathlib import Path
 
 def test_future_action_horizon_reads_config():
     config_path = (
-        Path(__file__).resolve().parents[1] / "configs" / "wm_config.yaml"
+        Path(__file__).resolve().parents[1] / "configs" / "dino_wm_config.yaml"
     )
     original = config_path.read_text()
     new_val = 123

@@ -7,7 +7,7 @@ This guide outlines best practices for training and evaluating the DINO-based Vi
 Train the World Model using the default configuration:
 
 ```bash
-python dino_wm/train_dino_wm.py --config configs/wm_config.yaml
+python dino_wm/train_dino_wm.py --config configs/dino_wm_config.yaml
 ```
 
 The script supports both YAML configuration and CLI flags. CLI flags will override values specified in the YAML file.

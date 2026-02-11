@@ -105,6 +105,35 @@ def test_loader_prefers_actions_delta(tmp_path):
     assert torch.allclose(sample["action"], torch.tensor(actions_delta[:2], dtype=torch.float32))
 
 
+def test_loader_supports_custom_latent_keys(tmp_path):
+    test_loader = _load_test_loader()
+
+    hdf5_path = tmp_path / "test_loader_custom_latents.h5"
+    with h5py.File(hdf5_path, "w") as h5f:
+        grp = h5f.create_group("trajectory_0")
+        grp.create_dataset("camera_0", data=np.zeros((3, 2, 2, 3), dtype=np.uint8))
+        grp.create_dataset("camera_1", data=np.zeros((3, 2, 2, 3), dtype=np.uint8))
+        grp.create_dataset("wan_front_embd", data=np.ones((3, 4, 16), dtype=np.float32))
+        grp.create_dataset("wan_wrist_embd", data=np.full((3, 4, 16), 2.0, dtype=np.float32))
+        grp.create_dataset("states", data=np.zeros((3, 2), dtype=np.float32))
+        grp.create_dataset("actions", data=np.zeros((3, 2), dtype=np.float32))
+
+    dataset = test_loader.SplitTrajectoryDataset(
+        str(hdf5_path),
+        segment_length=2,
+        split="train",
+        num_test=0,
+        seed=0,
+        front_embd_key="wan_front_embd",
+        wrist_embd_key="wan_wrist_embd",
+    )
+    sample = dataset[0]
+    assert sample["cam_zed_embd"].shape == (2, 4, 16)
+    assert sample["cam_rs_embd"].shape == (2, 4, 16)
+    assert torch.allclose(sample["cam_zed_embd"], torch.ones((2, 4, 16), dtype=torch.float32))
+    assert torch.allclose(sample["cam_rs_embd"], torch.full((2, 4, 16), 2.0, dtype=torch.float32))
+
+
 def test_compute_stats_quantiles(tmp_path):
     compute_stats = _load_compute_stats()
     hdf5_path = tmp_path / "test_stats_quantiles.h5"

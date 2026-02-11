@@ -7,7 +7,7 @@ _DINO_WM_DIR = _ROOT / "dino_wm"
 if str(_DINO_WM_DIR) not in sys.path:
     sys.path.insert(0, str(_DINO_WM_DIR))
 
-from train_dino_wm import sample_future_action_window
+from train_wm_common import sample_future_action_window
 
 
 def test_future_action_window_sampling():

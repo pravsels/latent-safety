@@ -4,34 +4,30 @@ Train the DINO World Model (VideoTransformer) on trajectory data.
 
 Quickstart:
 
-  python dino_wm/train_dino_wm.py --hdf5-file arx5_subset_train.h5
+  python dino_wm/train_dino_wm.py --config configs/dino_wm_config.yaml
 
-With custom parameters:
+With common overrides:
 
   python dino_wm/train_dino_wm.py \
-    --hdf5-file arx5_subset_train.h5 \
-    --resume-checkpoint dino_wm_checkpoints/wm_iter5000.pth \
-    --start-iter 5000 --batch-size 128
+    --config configs/dino_wm_config.yaml \
+    --hdf5-file arx5_datasets_6Feb_26.h5 \
+    --dataset-stats arx5_datasets_6Feb_26_stats.json \
+    --checkpoint-dir dino_wm_checkpoints \
+    --auto-resume
 """
 
 import argparse
 import os
 import sys
-import h5py
-import json
 import numpy as np
 import torch
 import random
 import wandb
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
-from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 import torch.nn.functional as F
 from einops import rearrange
 import matplotlib.pyplot as plt
-from tqdm import tqdm
 
 # Ensure repo root is on sys.path regardless of current working directory.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -40,220 +36,18 @@ if _REPO_ROOT not in sys.path:
 
 from test_loader import SplitTrajectoryDataset
 from dino_decoder import VQVAE
-from dino_models import VideoTransformer, normalize_acs, normalize_states, unnormalize_states
+from dino_models import VideoTransformer, normalize_acs, normalize_states
 from dino_wm.checkpoint_utils import filter_state_dict_by_shape
-from dino_wm.config import MODEL_CONFIG, TRAIN_CONFIG, DECODER_CONFIG, get_dino_config, get_decoder_image_size
-
-
-def _resolve_wm_checkpoint(checkpoint_dir: str) -> str | None:
-    """
-    Pick the most appropriate WM checkpoint from a directory.
-
-    Preference order:
-    1) best_wm.pth
-    2) latest_wm.pth (preemption-safe rich dict)
-    3) highest wm_iter{N}.pth (rich dict checkpoints)
-    """
-    try:
-        best_path = os.path.join(checkpoint_dir, "best_wm.pth")
-        if os.path.exists(best_path):
-            return best_path
-
-        latest_path = os.path.join(checkpoint_dir, "latest_wm.pth")
-        if os.path.exists(latest_path):
-            return latest_path
-
-        if not os.path.isdir(checkpoint_dir):
-            return None
-
-        best_iter = None
-        best_path = None
-        for name in os.listdir(checkpoint_dir):
-            # expected: wm_iter2000.pth
-            if not (name.startswith("wm_iter") and name.endswith(".pth")):
-                continue
-            mid = name[len("wm_iter") : -len(".pth")]
-            if not mid.isdigit():
-                continue
-            it = int(mid)
-            if best_iter is None or it > best_iter:
-                best_iter = it
-                best_path = os.path.join(checkpoint_dir, name)
-        return best_path
-    except Exception:
-        # Never crash due to checkpoint directory issues; caller will handle None.
-        return None
-
-
-def _global_grad_norm(parameters, norm_type: float = 2.0) -> float:
-    """Compute global grad norm over a set of parameters."""
-    grads = [p.grad.detach() for p in parameters if p.grad is not None]
-    if not grads:
-        return 0.0
-    if norm_type == float("inf"):
-        return max(g.abs().max().item() for g in grads)
-    total = 0.0
-    for g in grads:
-        total += g.norm(norm_type).item() ** norm_type
-    return total ** (1.0 / norm_type)
-
-
-def _global_weight_norm(parameters, norm_type: float = 2.0) -> float:
-    params = [p.detach() for p in parameters]
-    if not params:
-        return 0.0
-    if norm_type == float("inf"):
-        return max(p.abs().max().item() for p in params)
-    total = 0.0
-    for p in params:
-        total += p.norm(norm_type).item() ** norm_type
-    return total ** (1.0 / norm_type)
-
-
-def _load_yaml_config(path: str) -> dict:
-    """
-    Load YAML into a plain dict.
-    Uses ruamel.yaml (repo dependency via setup.py) and supports env var expansion.
-    """
-    import pathlib
-    import ruamel.yaml as ryaml
-
-    p = os.path.expandvars(os.path.expanduser(path))
-    if not os.path.exists(p):
-        return {}
-    cfg = ryaml.YAML(typ="safe", pure=True).load(pathlib.Path(p).read_text()) or {}
-    if not isinstance(cfg, dict):
-        raise ValueError(f"Config must be a mapping (YAML dict). Got: {type(cfg)}")
-    return cfg
-
-
-def init_distributed_from_env() -> tuple[int, int, int, bool]:
-    rank = int(os.environ.get("RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    is_distributed = world_size > 1
-    if is_distributed:
-        torch.distributed.init_process_group(
-            backend="nccl",
-            rank=rank,
-            world_size=world_size,
-        )
-        torch.cuda.set_device(local_rank)
-    return rank, world_size, local_rank, is_distributed
-
-
-def build_train_loader(
-    dataset: torch.utils.data.Dataset,
-    batch_size: int,
-    *,
-    is_distributed: bool,
-    rank: int,
-    world_size: int,
-) -> tuple[DataLoader, DistributedSampler | None]:
-    if is_distributed:
-        sampler = DistributedSampler(
-            dataset,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=True,
-        )
-        loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
-    else:
-        sampler = None
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    return loader, sampler
-
-
-def _compute_lr_factor(
-    step: int,
-    total_steps: int,
-    warmup_steps: int,
-    min_lr_factor: float,
-    schedule: str,
-) -> float:
-    """Compute LR multiplier factor for a given global step."""
-    if schedule == "constant":
-        return 1.0
-
-    # warmup
-    warmup_steps = int(max(0, warmup_steps))
-    if warmup_steps > 0 and step < warmup_steps:
-        return float(step + 1) / float(warmup_steps)
-
-    # cosine over the remaining steps
-    denom = max(1, int(total_steps) - warmup_steps)
-    t = min(1.0, max(0.0, float(step - warmup_steps) / float(denom)))
-    cosine = 0.5 * (1.0 + float(torch.cos(torch.tensor(t * 3.141592653589793)).item()))
-    return float(min_lr_factor) + (1.0 - float(min_lr_factor)) * cosine
-
-
-
-def compute_action_horizon_indices(
-    *,
-    context_length: int,
-    pred_step: int,
-    action_horizon: int,
-    device: str | torch.device | None = None,
-) -> tuple[torch.Tensor, slice, int, int]:
-    if context_length < 1:
-        raise ValueError(f"context_length must be >= 1 (got {context_length})")
-    if pred_step < 1:
-        raise ValueError(f"pred_step must be >= 1 (got {pred_step})")
-    if action_horizon < 1:
-        raise ValueError(f"action_horizon must be >= 1 (got {action_horizon})")
-    # Context indices are spaced by pred_step in raw-frame time.
-    # action_horizon here is the MAX horizon used to size segments; training may
-    # later sample a shorter future_len per batch.
-    ctx_idx = torch.arange(context_length, device=device, dtype=torch.long) * pred_step
-    last_ctx_idx = int(ctx_idx[-1].item())  # current (latest) context time t
-    # Condition on actions a_{t+1}..a_{t+action_horizon} (end-exclusive slice).
-    future_slice = slice(last_ctx_idx + 1, last_ctx_idx + 1 + action_horizon)
-    # Predict the observation/state at t + action_horizon + 1.
-    target_idx = last_ctx_idx + action_horizon + 1
-    segment_length = target_idx + 1
-    return ctx_idx, future_slice, target_idx, segment_length
-
-
-def compute_action_horizon_ar_indices(
-    *,
-    context_length: int,
-    pred_step: int,
-    action_horizon: int,
-    device: str | torch.device | None = None,
-) -> tuple[torch.Tensor, slice, int, slice, int, int]:
-    ctx_idx, future_slice, target_idx, _ = compute_action_horizon_indices(
-        context_length=context_length,
-        pred_step=pred_step,
-        action_horizon=action_horizon,
-        device=device,
-    )
-    # AR pass shifts everything forward by one step:
-    # - future action window becomes a_{t+2}..a_{t+action_horizon+1}
-    # - target becomes the next frame t+action_horizon+2
-    ar_future_slice = slice(future_slice.start + 1, future_slice.stop + 1)
-    ar_target_idx = target_idx + 1
-    segment_length = ar_target_idx + 1
-    return ctx_idx, future_slice, target_idx, ar_future_slice, ar_target_idx, segment_length
-
-
-def sample_future_action_window(
-    *,
-    action_horizon: int,
-    future_action_steps_train: int,
-    rng: random.Random | None = None,
-) -> int:
-    # action_horizon is the max horizon (e.g., 100). We sample a shorter
-    # training horizon per batch (<= future_action_steps_train) to vary
-    # the conditioning length across updates.
-    if action_horizon < 1:
-        raise ValueError(f"action_horizon must be >= 1 (got {action_horizon})")
-    if future_action_steps_train < 1:
-        raise ValueError(
-            f"future_action_steps_train must be >= 1 (got {future_action_steps_train})"
-        )
-    max_len = min(action_horizon, future_action_steps_train)
-    rng = rng or random
-    return int(rng.randint(1, max_len))
+from dino_wm.config import MODEL_CONFIG, DECODER_CONFIG, get_dino_config, get_decoder_image_size
+from dino_wm.train_wm_common import (
+    build_train_loader,
+    build_split_datasets,
+    init_distributed_from_env,
+    load_stats_tensors,
+    load_yaml_config as _load_yaml_config,
+    run_train_eval_loop,
+    resolve_wm_checkpoint as _resolve_wm_checkpoint,
+)
 
 
 def parse_args(argv=None):
@@ -264,8 +58,8 @@ def parse_args(argv=None):
     pre_parser.add_argument(
         "--config",
         type=str,
-        default=os.path.join("configs", "wm_config.yaml"),
-        help="Path to YAML config file (default: configs/wm_config.yaml). CLI flags override it.",
+        default=os.path.join("configs", "dino_wm_config.yaml"),
+        help="Path to YAML config file (default: configs/dino_wm_config.yaml). CLI flags override it.",
     )
     pre_args, remaining_argv = pre_parser.parse_known_args(argv)
     cfg = _load_yaml_config(pre_args.config)
@@ -474,7 +268,6 @@ def parse_args(argv=None):
         default=1000,
         help="Number of warmup iterations (default: 1000).",
     )
-
     # Apply YAML config as defaults (CLI overrides because we parse after this).
     known_dests = {a.dest for a in parser._actions}
     for k, v in (cfg or {}).items():
@@ -484,8 +277,8 @@ def parse_args(argv=None):
     return parser.parse_args(remaining_argv)
 
 
-def main():
-    args = parse_args()
+def main(argv=None):
+    args = parse_args(argv)
 
     rank, world_size, local_rank, is_distributed = init_distributed_from_env()
     is_rank0 = rank == 0
@@ -502,11 +295,12 @@ def main():
 
     # Set seeds
     torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    use_amp = True
+    use_amp = str(args.device).startswith("cuda") and torch.cuda.is_available()
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
     BS = args.batch_size
@@ -514,7 +308,6 @@ def main():
     EVAL_H = args.eval_horizon
     H = args.context_length
     pred_step = int(args.pred_step)
-    action_agg = "start"
     action_horizon = int(args.action_horizon)
     future_action_steps_train = int(args.future_action_steps_train)
     if is_distributed and str(args.device).startswith("cuda"):
@@ -526,6 +319,13 @@ def main():
         raise ValueError(f"--sequence-length must be >= 2 (got {BL}).")
     if H < 1:
         raise ValueError(f"--context-length must be >= 1 (got {H}).")
+    # The training target is one step beyond the context window.
+    # Keep sequence_length explicit to prevent silent config drift.
+    if BL != H + 1:
+        raise ValueError(
+            f"--sequence-length must equal --context-length + 1 for current WM training "
+            f"(got sequence_length={BL}, context_length={H})."
+        )
     if EVAL_H < 1:
         raise ValueError(f"--eval-horizon must be >= 1 (got {EVAL_H}).")
     if EVAL_H < H:
@@ -541,81 +341,45 @@ def main():
         raise ValueError(f"--eval-samples must be >= 1 (got {args.eval_samples}).")
     if pred_step < 1:
         raise ValueError(f"--pred-step must be >= 1 (got {pred_step}).")
+    print("Backbone flow: dino | front_latent_key=cam_zed_embd | wrist_latent_key=cam_rs_embd")
     
     # LOAD STATS
     stats_path = args.dataset_stats
-    if not os.path.exists(stats_path):
-        raise FileNotFoundError(
-            f"Stats file '{stats_path}' not found! Please run scripts/compute_stats_json.py to generate it."
-        )
-
     print(f"Loading dataset stats from {stats_path}")
-    with open(stats_path, 'r') as f:
-        stats = json.load(f)
-    
-    # Check for required keys
-    required_keys = ["action_min", "action_max", "state_min", "state_max"]
-    missing_keys = [k for k in required_keys if k not in stats]
-    
-    if missing_keys:
-        raise ValueError(f"Stats file missing required keys: {missing_keys}")
-
-    # Create tensors on device
-    action_min = torch.tensor(stats['action_min']).float().to(device)
-    action_max = torch.tensor(stats['action_max']).float().to(device)
-    state_min = torch.tensor(stats['state_min']).float().to(device)
-    state_max = torch.tensor(stats['state_max']).float().to(device)
-    action_q02 = torch.tensor(stats['action_delta_q02']).float().to(device) if "action_delta_q02" in stats else None
-    action_q98 = torch.tensor(stats['action_delta_q98']).float().to(device) if "action_delta_q98" in stats else None
-    state_q02 = torch.tensor(stats['state_q02']).float().to(device) if "state_q02" in stats else None
-    state_q98 = torch.tensor(stats['state_q98']).float().to(device) if "state_q98" in stats else None
-    
-    # Infer dimensions from stats
-    state_dim = len(stats['state_min'])
-    action_dim = len(stats['action_min'])
+    _, stats_tensors, state_dim, action_dim = load_stats_tensors(stats_path, device)
+    action_min = stats_tensors["action_min"]
+    action_max = stats_tensors["action_max"]
+    state_min = stats_tensors["state_min"]
+    state_max = stats_tensors["state_max"]
+    action_q02 = stats_tensors["action_q02"]
+    action_q98 = stats_tensors["action_q98"]
+    state_q02 = stats_tensors["state_q02"]
+    state_q98 = stats_tensors["state_q98"]
     
     print(f"Loaded state normalization stats from {stats_path}")
     print(f"Inferred state_dim={state_dim}, action_dim={action_dim} from dataset stats")
 
     # Dataset setup
     hdf5_file = args.hdf5_file
-    
-    # Count trajectories and compute split
-    with h5py.File(hdf5_file, "r") as hf:
-        num_traj = len(hf.keys())
-    
-    num_test = max(1, int(args.test_frac * num_traj))
-    if num_traj - num_test < 1 and num_traj > 1:
-        num_test = num_traj - 1
-    
-    # We load contiguous raw-frame segments, then later index into them using pred_step and action_horizon.
-    _, _, _, _, _, train_raw_len = compute_action_horizon_ar_indices(
+    dataset_info = build_split_datasets(
+        SplitTrajectoryDataset,
+        hdf5_file=hdf5_file,
+        test_frac=float(args.test_frac),
         context_length=H,
         pred_step=pred_step,
         action_horizon=action_horizon,
-        device="cpu",
-    )
-    expert_data = SplitTrajectoryDataset(
-        hdf5_file,
-        train_raw_len,
-        split='train',
-        num_test=num_test,
         action_key=args.action_key,
+        front_latent_key="cam_zed_embd",
+        wrist_latent_key="cam_rs_embd",
     )
-    expert_data_eval = SplitTrajectoryDataset(
-        hdf5_file,
-        train_raw_len,
-        split='test',
-        num_test=num_test,
-        action_key=args.action_key,
-    )
-    expert_data_imagine = SplitTrajectoryDataset(
-        hdf5_file,
-        train_raw_len,
-        split='test',
-        num_test=num_test,
-        action_key=args.action_key,
-    )
+    # Primary training split used for gradient updates.
+    expert_data = dataset_info["expert_data"]
+    # Held-out split for numeric eval loss tracking.
+    expert_data_eval = dataset_info["expert_data_eval"]
+    # Held-out split sampled for qualitative "imagine" visualizations during eval.
+    expert_data_imagine = dataset_info["expert_data_imagine"]
+    num_traj = dataset_info["num_traj"]
+    num_test = dataset_info["num_test"]
     
     print(f"Dataset: {hdf5_file}")
     print(f"  Train: {num_traj - num_test} trajectories")
@@ -628,29 +392,28 @@ def main():
         rank=rank,
         world_size=world_size,
     )
-    expert_loader = iter(train_loader)
-    expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
-    expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
 
-    # Configure model dimensions and image sizes based on selected DINO version
+    # Configure model dimensions and image sizes based on selected DINO version.
     dino_cfg = get_dino_config(args.dino_version)
     decoder_img_size = get_decoder_image_size(args.dino_version)
-
     MODEL_CONFIG['dim'] = dino_cfg['dim']
     MODEL_CONFIG['image_size'] = decoder_img_size
+    latent_num_patches = int(dino_cfg['num_patches'])
     DECODER_CONFIG['decoder_image_size'] = decoder_img_size
 
-    # Load decoder
     decoder = VQVAE().to(device)
     decoder_ckpt = torch.load(args.decoder_checkpoint, map_location=device)
+
     if isinstance(decoder_ckpt, dict) and "model_state_dict" in decoder_ckpt:
         decoder_state = decoder_ckpt["model_state_dict"]
     else:
         decoder_state = decoder_ckpt
+
     filtered, missing, unexpected, mismatched = filter_state_dict_by_shape(
         decoder.state_dict(),
         decoder_state,
     )
+
     decoder.load_state_dict(filtered, strict=False)
     if missing:
         print(f"Warning: decoder missing {len(missing)} keys from checkpoint.")
@@ -659,7 +422,7 @@ def main():
     if mismatched:
         print(f"Warning: decoder skipped {len(mismatched)} mismatched keys.")
     decoder.eval()
-    print(f"Loaded decoder from {args.decoder_checkpoint}")
+    print(f"Loaded DINO decoder from {args.decoder_checkpoint}")
 
     # Initialize world model
     transition = VideoTransformer(
@@ -667,7 +430,9 @@ def main():
         action_dim=action_dim,  # Inferred from dataset stats
         num_frames=H,           # context window size
         action_horizon=action_horizon,
+        backbone="dino",
         dino_version=args.dino_version,
+        num_patches=latent_num_patches,
         **MODEL_CONFIG
     ).to(device)
 
@@ -684,6 +449,7 @@ def main():
         {'params': transition_module.front_head.parameters(), 'lr': 5e-5},
         {'params': transition_module.wrist_head.parameters(), 'lr': 5e-5},
         {'params': transition_module.action_encoder.parameters(), 'lr': 5e-4},
+        {'params': transition_module.trajectory_encoder.parameters(), 'lr': 5e-4},
         {'params': transition_module.state_encoder.parameters(), 'lr': 5e-4},
         {'params': [transition_module.pos_embedding], 'lr': 5e-4},
         {'params': [transition_module.temp_embedding], 'lr': 5e-4}
@@ -788,305 +554,73 @@ def main():
 
     transition.train()
 
-    iters = []
     train_iter = args.train_iters
+    def _render_eval_images_fn(*, pred_front, pred_wrist, eval_data, target_idx, device):
+        pred_front_last = pred_front[:, [-1]]
+        pred_wrist_last = pred_wrist[:, [-1]]
+        pred_latent = torch.cat([pred_front_last, pred_wrist_last], dim=0)
+        pred_ims, _ = decoder(pred_latent)
+        pred_ims = rearrange(pred_ims, "(b t) c h w -> b t h w c", t=1)
+        pred_im1, pred_im2 = torch.split(pred_ims, [1, 1], dim=0)
+        pred_im1 = pred_im1.squeeze(0).squeeze(0)
+        pred_im2 = pred_im2.squeeze(0).squeeze(0)
+        target_size = DECODER_CONFIG['decoder_image_size']
 
-    def _make_ckpt_dict(iter_idx: int) -> dict:
+        gt_im1 = eval_data['agentview_image'][[0]].to(device)[:, target_idx] / 255.
+        gt_im2 = eval_data['robot0_eye_in_hand_image'][[0]].to(device)[:, target_idx] / 255.
+        gt_im1 = F.interpolate(
+            gt_im1.permute(0, 3, 1, 2), size=target_size, mode='bilinear', align_corners=False
+        ).permute(0, 2, 3, 1)
+        gt_im2 = F.interpolate(
+            gt_im2.permute(0, 3, 1, 2), size=target_size, mode='bilinear', align_corners=False
+        ).permute(0, 2, 3, 1)
         return {
-            'model_state_dict': transition_module.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'iter': int(iter_idx),
-            'best_eval': float(best_eval),
-            'seed': int(args.seed),
+            'pred_front': pred_im1.detach().cpu().numpy(),
+            'pred_wrist': pred_im2.detach().cpu().numpy(),
+            'front': gt_im1.squeeze(0).detach().cpu().numpy(),
+            'wrist': gt_im2.squeeze(0).detach().cpu().numpy(),
         }
 
-    for i in tqdm(range(start_iter, train_iter), desc="Training", unit="iter"):
-        # --- LR update ---
-        lr_factor = _compute_lr_factor(
-            step=i,
-            total_steps=train_iter,
-            warmup_steps=int(args.lr_warmup_iters),
-            min_lr_factor=float(args.lr_min_factor),
-            schedule=str(args.lr_schedule),
-        )
-        for pg, base_lr in zip(optimizer.param_groups, base_lrs):
-            pg['lr'] = base_lr * lr_factor
-
-        if i > 0 and i % len(train_loader) == 0:
-            if train_sampler is not None:
-                train_sampler.set_epoch(i)
-            train_loader, train_sampler = build_train_loader(
-                expert_data,
-                BS,
-                is_distributed=is_distributed,
-                rank=rank,
-                world_size=world_size,
-            )
-            expert_loader = iter(train_loader)
-        if i > 0 and i % len(expert_loader_eval) == 0:
-            expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
-        if i > 0 and i % len(expert_loader_imagine) == 0:
-            expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
-
-        data = next(expert_loader)
-
-        ctx_idx = torch.arange(H, device=device, dtype=torch.long) * pred_step
-        t = int(ctx_idx[-1].item())
-        future_len = sample_future_action_window(
-            action_horizon=action_horizon,
-            future_action_steps_train=future_action_steps_train,
-        )
-        # Future actions are a_{t+1}..a_{t+future_len}; target is t+future_len+1.
-        future_slice = slice(t + 1, t + 1 + future_len)
-        target_idx = t + future_len + 1
-        ar_future_slice = slice(t + 2, t + 2 + future_len)
-        ar_target_idx = t + future_len + 2
-        if is_rank0 and i == start_iter:
-            print(f"Context idx (pred_step={pred_step}): {ctx_idx.tolist()}")
-            print(f"t (last context idx): {t}")
-            print(f"future_len: {future_len}")
-            print(
-                f"Target idx: {t}+{future_len}+1 -> {target_idx}; "
-                f"AR target idx: {t}+{future_len}+2 -> {ar_target_idx}"
-            )
-
-        gt_front_raw = data['cam_zed_embd'].to(device)
-        input_front_embd = gt_front_raw.index_select(1, ctx_idx)
-        target_front_embd = gt_front_raw[:, target_idx]
-
-        gt_wrist_raw = data['cam_rs_embd'].to(device)
-        input_wrist_embd = gt_wrist_raw.index_select(1, ctx_idx)
-        target_wrist_embd = gt_wrist_raw[:, target_idx]
-
-        gt_state_raw = data['state'].to(device)
-        norm_gt_state_raw = normalize_states(
-            gt_state_raw, state_min, state_max, q02=state_q02, q98=state_q98
-        )
-        input_state = norm_gt_state_raw.index_select(1, ctx_idx)
-        target_state = norm_gt_state_raw[:, target_idx]
-
-        gt_acs_raw = data['action'].to(device)
-        norm_gt_acs_raw = normalize_acs(
-            gt_acs_raw, action_min, action_max, q02=action_q02, q98=action_q98
-        )
-        # Action tokens aligned to each context step index.
-        input_acs = norm_gt_acs_raw.index_select(1, ctx_idx)
-        future_actions = norm_gt_acs_raw[:, future_slice]
-        if is_rank0 and i == start_iter:
-            print(
-                f"\nFuture actions shape: {tuple(future_actions.shape)} "
-                f"(future_len={future_len})"
-            )
-
-        optimizer.zero_grad()
-
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            pred_front, pred_wrist, pred_state, _ = transition(
-                input_front_embd,
-                input_wrist_embd,
-                input_state,
-                input_acs,
-                future_actions,
-            )
-            loss_front_tf = nn.MSELoss()(pred_front[:, -1], target_front_embd)
-            loss_wrist_tf = nn.MSELoss()(pred_wrist[:, -1], target_wrist_embd)
-            loss_state_tf = nn.MSELoss()(pred_state[:, -1], target_state)
-            loss_tf = loss_front_tf + loss_wrist_tf + loss_state_tf
-
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            input_front_ar = torch.cat(
-                [input_front_embd[:, 1:], pred_front[:, -1].unsqueeze(1)],
-                dim=1,
-            )
-            input_wrist_ar = torch.cat(
-                [input_wrist_embd[:, 1:], pred_wrist[:, -1].unsqueeze(1)],
-                dim=1,
-            )
-            input_state_ar = torch.cat(
-                [input_state[:, 1:], pred_state[:, -1].unsqueeze(1)],
-                dim=1,
-            )
-            ctx_idx_ar = torch.cat([ctx_idx[1:], torch.tensor([target_idx], device=device)])
-            input_acs_ar = norm_gt_acs_raw.index_select(1, ctx_idx_ar)
-            future_actions_ar = norm_gt_acs_raw[:, ar_future_slice]
-            pred_front_ar, pred_wrist_ar, pred_state_ar, _ = transition(
-                input_front_ar,
-                input_wrist_ar,
-                input_state_ar,
-                input_acs_ar,
-                future_actions_ar,
-            )
-            target_front_ar = gt_front_raw[:, ar_target_idx]
-            target_wrist_ar = gt_wrist_raw[:, ar_target_idx]
-            target_state_ar = norm_gt_state_raw[:, ar_target_idx]
-            loss_front_ar = nn.MSELoss()(pred_front_ar[:, -1], target_front_ar)
-            loss_wrist_ar = nn.MSELoss()(pred_wrist_ar[:, -1], target_wrist_ar)
-            loss_state_ar = nn.MSELoss()(pred_state_ar[:, -1], target_state_ar)
-            loss_ar = loss_front_ar + loss_wrist_ar + loss_state_ar
-
-        loss = loss_tf + loss_ar * 0.5
-
-        scaler.scale(loss).backward()
-
-        # Norms and Step
-        scaler.unscale_(optimizer)
-        grad_norm = _global_grad_norm(transition_module.parameters())
-        scaler.step(optimizer)
-        scaler.update()
-        weight_norm = _global_weight_norm(transition_module.parameters())
-
-        train_loss = loss.item()
-        print(
-            f"\rIter {i} | lr {optimizer.param_groups[0]['lr']:.2e} | TF {loss_tf:.4f} | AR {loss_ar:.4f} | grad {grad_norm:.2f} | weight {weight_norm:.2f}",
-            end='',
-            flush=True
-        )
-        if is_rank0:
-            wandb.log({
-                'train_loss': loss_tf,
-                'train_loss_ar': loss_ar,
-                'grad_norm': grad_norm,
-                'weight_norm': weight_norm,
-                'lr': optimizer.param_groups[0]['lr'],
-                'lr_factor': lr_factor,
-            })
-
-        # Periodic "latest" checkpoint
-        if is_rank0 and args.save_every and (i % args.save_every == 0):
-            torch.save(_make_ckpt_dict(i), latest_ckpt_path)
-
-        # Evaluation
-        if is_rank0 and (i) % args.eval_interval == 0:
-            iters.append(i)
-            transition.eval()
-
-            # Metrics to average
-            avg_metrics = {
-                'eval_loss': 0.0,
-                'front_loss': 0.0,
-                'wrist_loss': 0.0,
-                'state_loss': 0.0,
-            }
-
-            num_samples = args.eval_samples
-
-            print(f"\nRunning evaluation on {num_samples} samples...")
-
-            sample_images = None
-            for s_idx in range(num_samples):
-                with torch.no_grad():
-                    # Get sample for single-step t+K evaluation
-                    eval_data = next(expert_loader_imagine)
-                    gt_front_embd_eval = eval_data['cam_zed_embd'].to(device)
-                    ctx_idx = torch.arange(H, device=device, dtype=torch.long) * pred_step
-                    t = int(ctx_idx[-1].item())
-                    future_len = sample_future_action_window(
-                        action_horizon=action_horizon,
-                        future_action_steps_train=future_action_steps_train,
-                    )
-                    target_idx = t + future_len + 1
-                    input_front_embd_eval = gt_front_embd_eval.index_select(1, ctx_idx)
-
-                    gt_wrist_embd_eval = eval_data['cam_rs_embd'].to(device)
-                    input_wrist_embd_eval = gt_wrist_embd_eval.index_select(1, ctx_idx)
-
-                    all_acs = eval_data['action'][[0]].to(device)
-                    all_acs = normalize_acs(
-                        all_acs, action_min, action_max, q02=action_q02, q98=action_q98
-                    )
-
-                    # Action tokens aligned to each context step index.
-                    acs = all_acs.index_select(1, ctx_idx)
-
-                    gt_states_eval = eval_data['state'][[0]].to(device)
-                    input_states_eval = normalize_states(
-                        gt_states_eval, state_min, state_max, q02=state_q02, q98=state_q98
-                    ).index_select(1, ctx_idx)
-                    future_actions = all_acs[:, t + 1:t + 1 + future_len]
-                    pred_front, pred_wrist, pred_state, _ = transition(
-                        input_front_embd_eval,
-                        input_wrist_embd_eval,
-                        input_states_eval,
-                        acs,
-                        future_actions,
-                    )
-
-                    target_front = gt_front_embd_eval[[0], target_idx]
-                    target_wrist = gt_wrist_embd_eval[[0], target_idx]
-                    target_state = normalize_states(
-                        gt_states_eval[[0], target_idx],
-                        state_min,
-                        state_max,
-                        q02=state_q02,
-                        q98=state_q98,
-                    )
-
-                    l_front = nn.MSELoss()(pred_front[:, -1], target_front).item()
-                    l_wrist = nn.MSELoss()(pred_wrist[:, -1], target_wrist).item()
-                    l_state = nn.MSELoss()(pred_state[:, -1], target_state).item()
-
-                    avg_metrics['eval_loss'] += (l_front + l_wrist + l_state)
-                    avg_metrics['front_loss'] += l_front
-                    avg_metrics['wrist_loss'] += l_wrist
-                    avg_metrics['state_loss'] += l_state
-
-                    if sample_images is None:
-                        pred_latent = torch.cat([pred_front[:, [-1]], pred_wrist[:, [-1]]], dim=0)
-                        pred_ims, _ = decoder(pred_latent)
-                        pred_ims = rearrange(pred_ims, "(b t) c h w -> b t h w c", t=1)
-                        pred_im1, pred_im2 = torch.split(pred_ims, [1, 1], dim=0)
-                        gt_im1 = eval_data['agentview_image'][[0]].to(device)[:, target_idx] / 255.
-                        gt_im2 = eval_data['robot0_eye_in_hand_image'][[0]].to(device)[:, target_idx] / 255.
-                        gt_im1 = F.interpolate(
-                            gt_im1.permute(0, 3, 1, 2),
-                            size=DECODER_CONFIG['decoder_image_size'],
-                            mode='bilinear',
-                            align_corners=False,
-                        ).permute(0, 2, 3, 1)
-                        gt_im2 = F.interpolate(
-                            gt_im2.permute(0, 3, 1, 2),
-                            size=DECODER_CONFIG['decoder_image_size'],
-                            mode='bilinear',
-                            align_corners=False,
-                        ).permute(0, 2, 3, 1)
-                        sample_images = {
-                            'pred_front': pred_im1.squeeze(0).squeeze(0).detach().cpu().numpy(),
-                            'pred_wrist': pred_im2.squeeze(0).squeeze(0).detach().cpu().numpy(),
-                            'front': gt_im1.squeeze(0).detach().cpu().numpy(),
-                            'wrist': gt_im2.squeeze(0).detach().cpu().numpy(),
-                        }
-
-            # Finalize metrics
-            for k in avg_metrics:
-                avg_metrics[k] /= num_samples
-
-            # Print summary
-            print(f"\rIter {i}, Eval Loss: {avg_metrics['eval_loss']:.4f}, front: {avg_metrics['front_loss']:.4f}, wrist: {avg_metrics['wrist_loss']:.4f}, state: {avg_metrics['state_loss']:.4f}")
-
-            os.makedirs(args.checkpoint_dir, exist_ok=True)
-            torch.save(_make_ckpt_dict(i), os.path.join(args.checkpoint_dir, f'wm_iter{i}.pth'))
-
-            if avg_metrics['eval_loss'] < best_eval:
-                best_eval = avg_metrics['eval_loss']
-                torch.save(_make_ckpt_dict(i), os.path.join(args.checkpoint_dir, 'best_wm.pth'))
-
-            transition.train()
-
-            # Log all to WandB
-            log_dict = {
-                'eval_loss': avg_metrics['eval_loss'],
-                'front_loss': avg_metrics['front_loss'],
-                'wrist_loss': avg_metrics['wrist_loss'],
-                'state_loss': avg_metrics['state_loss'],
-            }
-            if sample_images is not None:
-                log_dict.update({
-                    'pred_front': wandb.Image(sample_images['pred_front']),
-                    'pred_wrist': wandb.Image(sample_images['pred_wrist']),
-                    'front': wandb.Image(sample_images['front']),
-                    'wrist': wandb.Image(sample_images['wrist']),
-                })
-            wandb.log(log_dict)
+    best_eval = run_train_eval_loop(
+        args=args,
+        start_iter=start_iter,
+        train_iter=train_iter,
+        transition=transition,
+        transition_module=transition_module,
+        optimizer=optimizer,
+        base_lrs=base_lrs,
+        scaler=scaler,
+        use_amp=use_amp,
+        train_loader=train_loader,
+        train_sampler=train_sampler,
+        expert_data=expert_data,
+        expert_data_eval=expert_data_eval,
+        expert_data_imagine=expert_data_imagine,
+        H=H,
+        pred_step=pred_step,
+        action_horizon=action_horizon,
+        future_action_steps_train=future_action_steps_train,
+        device=device,
+        is_rank0=is_rank0,
+        is_distributed=is_distributed,
+        rank=rank,
+        world_size=world_size,
+        action_min=action_min,
+        action_max=action_max,
+        state_min=state_min,
+        state_max=state_max,
+        action_q02=action_q02,
+        action_q98=action_q98,
+        state_q02=state_q02,
+        state_q98=state_q98,
+        latest_ckpt_path=latest_ckpt_path,
+        checkpoint_dir=args.checkpoint_dir,
+        best_eval=best_eval,
+        seed=args.seed,
+        normalize_acs_fn=normalize_acs,
+        normalize_states_fn=normalize_states,
+        render_eval_images_fn=_render_eval_images_fn,
+    )
 
     if is_rank0:
         plt.legend()

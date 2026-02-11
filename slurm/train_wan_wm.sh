@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=dino_wm
+#SBATCH --job-name=wan_wm
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=3
@@ -10,7 +10,6 @@
 #SBATCH --error=slurm-%j.err
 #SBATCH --requeue
 
-# Exit on any error
 set -e
 
 module purge
@@ -29,20 +28,13 @@ WANDB_CACHE_DIR="${data_dir}/wandb_cache"
 WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 
 # Training config
-HDF5_FILE="${data_dir}/arx5_datasets_6Feb_26.h5"
+HDF5_FILE="${data_dir}/arx5_datasets_6Feb_26_wan.h5"
 STATS_FILE="${data_dir}/arx5_datasets_6Feb_26_stats.json"
-CONFIG_FILE="configs/dino_wm_config.yaml"
-CONFIG_PATH="${repo_dir}/${CONFIG_FILE}"
+CONFIG_FILE="configs/wan_wm_config.yaml"
+WAN_VAE_MODEL="ByteDance/Video-As-Prompt-Wan2.1-14B"
+CHECKPOINT_DIR="${data_dir}/wan_wm_checkpoints"
 
-mkdir -p "${PYTHON_EXT_DIR}" "${HF_CACHE}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
-
-# Ensure repo weights path points to scratch weights for relative lookups
-if [ -L "${repo_dir}/weights" ] || [ ! -e "${repo_dir}/weights" ]; then
-    ln -sfn "${data_dir}/weights" "${repo_dir}/weights"
-elif [ -d "${repo_dir}/weights" ]; then
-    # If a real dir exists, still link the file so relative path resolves.
-    ln -sfn "${data_dir}/weights/dinov3_vits16plus.pth" "${repo_dir}/weights/dinov3_vits16plus.pth"
-fi
+mkdir -p "${PYTHON_EXT_DIR}" "${HF_CACHE}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}" "${CHECKPOINT_DIR}"
 
 start_time="$(date -Is --utc)"
 echo "===================================="
@@ -59,16 +51,18 @@ STATS_CMD="if [ \"\${SLURM_PROCID:-0}\" = \"0\" ]; then \
 fi; \
 while [ ! -f ${STATS_FILE} ]; do sleep 2; done"
 
-# Step 2: Training command
-TRAIN_CMD="python dino_wm/train_dino_wm.py \
+# Step 2: WAN backbone WM training
+TRAIN_CMD="python dino_wm/train_wan_wm.py \
     --config ${CONFIG_FILE} \
     --hdf5-file ${HDF5_FILE} \
     --dataset-stats ${STATS_FILE} \
+    --checkpoint-dir ${CHECKPOINT_DIR} \
+    --wan-vae-model ${WAN_VAE_MODEL} \
     --auto-resume"
 
 INSTALL_TORCHMETRICS_CMD="python -m pip install --upgrade --no-deps --target ${PYTHON_EXT_DIR} torchmetrics lightning-utilities packaging"
 
-echo "Running stats and training..."
+echo "Running stats and WAN training..."
 echo "Command: ${STATS_CMD} && ${TRAIN_CMD}"
 echo ""
 
@@ -82,7 +76,9 @@ apptainer exec --nv \
     "${container}" \
     bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
         export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
-        export CUDA_VISIBLE_DEVICES=0,1,2 && \
+        export RANK=\${SLURM_PROCID} WORLD_SIZE=\${SLURM_NTASKS} LOCAL_RANK=\${SLURM_LOCALID} && \
+        export MASTER_ADDR=\$(scontrol show hostnames \${SLURM_NODELIST} | head -n 1) && \
+        export MASTER_PORT=\${MASTER_PORT:-29500} && \
         if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"torchmetrics\") else 1)'; then \
             ${INSTALL_TORCHMETRICS_CMD}; \
         fi && ${STATS_CMD} && ${TRAIN_CMD}"
@@ -99,7 +95,7 @@ echo "===================================="
 
 if [ ${EXIT_CODE} -ne 0 ]; then
     echo ""
-    echo "ERROR: Training failed with exit code ${EXIT_CODE}"
+    echo "ERROR: WAN training failed with exit code ${EXIT_CODE}"
     echo "Check slurm-${SLURM_JOB_ID}.err for detailed error messages"
     exit ${EXIT_CODE}
 fi

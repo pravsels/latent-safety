@@ -8,7 +8,7 @@ def _load_train_module():
     dino_wm_dir = repo_root / "dino_wm"
     if str(dino_wm_dir) not in sys.path:
         sys.path.insert(0, str(dino_wm_dir))
-    train_path = dino_wm_dir / "train_dino_wm.py"
+    train_path = dino_wm_dir / "train_wm_common.py"
     spec = importlib.util.spec_from_file_location("wm_train", train_path)
     assert spec is not None and spec.loader is not None
     wm_train = importlib.util.module_from_spec(spec)
@@ -26,10 +26,10 @@ def test_action_horizon_slicing():
     )
 
     assert ctx_idx.tolist() == [0, 2, 4]
-    assert future_slice.start == 4
-    assert future_slice.stop == 8
-    assert target_idx == 8
-    assert segment_length == 9
+    assert future_slice.start == 5
+    assert future_slice.stop == 9
+    assert target_idx == 9
+    assert segment_length == 10
 
     (
         ctx_idx_ar,
@@ -45,10 +45,10 @@ def test_action_horizon_slicing():
         device="cpu",
     )
     assert ctx_idx_ar.tolist() == [0, 2, 4]
-    assert future_slice_ar.start == 4
-    assert future_slice_ar.stop == 8
-    assert target_idx_ar == 8
-    assert ar_future_slice.start == 5
-    assert ar_future_slice.stop == 9
-    assert ar_target_idx == 9
-    assert segment_length_ar == 10
+    assert future_slice_ar.start == 5
+    assert future_slice_ar.stop == 9
+    assert target_idx_ar == 9
+    assert ar_future_slice.start == 6
+    assert ar_future_slice.stop == 10
+    assert ar_target_idx == 10
+    assert segment_length_ar == 11

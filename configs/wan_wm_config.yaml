@@ -1,12 +1,14 @@
-# Default configuration for training the DINO World Model.
+# Default configuration for training the WAN-backbone World Model.
 # Usage:
-#   python dino_wm/train_dino_wm.py --config configs/wm_config.yaml
+#   python dino_wm/train_wan_wm.py --config configs/wan_wm_config.yaml
 
 # Data
-hdf5_file: arx5_datasets_6Feb_26.h5
+hdf5_file: arx5_datasets_6Feb_26_wan.h5
 dataset_stats: arx5_datasets_6Feb_26_stats.json
 test_frac: 0.1
 action_key: actions_delta
+front_latent_key: wan_front_embd
+wrist_latent_key: wan_wrist_embd
 
 # Training
 batch_size: 32
@@ -25,20 +27,21 @@ eval_interval: 1000
 eval_samples: 8
 save_every: 1000
 
-# World Model / Decoder
-dino_version: "v3"
-dino_assets:
-  decoder_checkpoint_dir: /scratch/u6cr/pravsels.u6cr/latent_safety/dino3_decoder_checkpoints
-  wm_checkpoint_dir: /scratch/u6cr/pravsels.u6cr/latent_safety/dino3_wm_checkpoints
-
 # Resume behavior
 auto_resume: true
 
+# WAN decoder options (used for eval image decoding during training)
+wan_vae_model: ByteDance/Video-As-Prompt-Wan2.1-14B
+wan_vae_subfolder: vae
+wan_vae_dtype: bf16
+wan_latent_height: 0
+wan_latent_width: 0
+
 # WandB
 wandb_mode: offline
-wandb_project: dino-WM-action-horizon
+wandb_project: wan-WM-action-horizon
 wandb_entity: pravsels
-wandb_name: dinov3-wm-action-horizon-first-run
+wandb_name: wan-wm-action-horizon-first-run
 
 # Optimizer / LR scheduling
 lr_schedule: cosine

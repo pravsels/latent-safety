@@ -15,6 +15,8 @@ class SplitTrajectoryDataset(Dataset):
         seed: int = 0,
         stride: int = 1,
         action_key: str = "actions_delta",
+        front_embd_key: str = "cam_zed_embd",
+        wrist_embd_key: str = "cam_rs_embd",
     ):
         """
         HDF5 trajectory dataset that returns fixed-length segments.
@@ -39,6 +41,8 @@ class SplitTrajectoryDataset(Dataset):
             raise ValueError(f"stride must be > 0. Got {self.stride}")
         self._hf = None  # lazily opened per worker/process
         self.action_key = action_key
+        self.front_embd_key = front_embd_key
+        self.wrist_embd_key = wrist_embd_key
         self._missing_action_key_warned = False
         
         # Open HDF5 file to get a list of trajectory groups
@@ -114,8 +118,12 @@ class SplitTrajectoryDataset(Dataset):
         segment_obs_tensor = {}
         segment_obs_tensor["robot0_eye_in_hand_image"] = torch.tensor(trajectory["camera_0"][start_idx:end_idx], dtype=torch.uint8)
         segment_obs_tensor["agentview_image"] = torch.tensor(trajectory["camera_1"][start_idx:end_idx], dtype=torch.uint8)
-        segment_obs_tensor["cam_rs_embd"] = torch.tensor(trajectory["cam_rs_embd"][start_idx:end_idx], dtype=torch.float32)
-        segment_obs_tensor["cam_zed_embd"] = torch.tensor(trajectory["cam_zed_embd"][start_idx:end_idx], dtype=torch.float32)
+        segment_obs_tensor["cam_rs_embd"] = torch.tensor(
+            trajectory[self.wrist_embd_key][start_idx:end_idx], dtype=torch.float32
+        )
+        segment_obs_tensor["cam_zed_embd"] = torch.tensor(
+            trajectory[self.front_embd_key][start_idx:end_idx], dtype=torch.float32
+        )
         segment_obs_tensor["state"] = torch.tensor(trajectory["states"][start_idx:end_idx], dtype=torch.float32)
         action_key = self._select_action_key(trajectory)
         segment_obs_tensor["action"] = torch.tensor(trajectory[action_key][start_idx:end_idx], dtype=torch.float32)

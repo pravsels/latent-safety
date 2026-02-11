@@ -34,7 +34,7 @@ sys.path.insert(0, parent_dir)
 from dino_wm.test_loader import SplitTrajectoryDataset
 from dino_wm.dino_decoder import VQVAE
 from dino_wm.dino_models import VideoTransformer, normalize_acs, normalize_states, unnormalize_states
-from dino_wm.config import MODEL_CONFIG
+from dino_wm.config import MODEL_CONFIG, get_dino_config, get_decoder_image_size
 
 
 def _load_state_dict_with_meta(path: str, device: str):
@@ -66,13 +66,102 @@ def _resolve_quantize_flag(ckpt_meta: dict, checkpoint_path: str) -> bool:
     return False
 
 
-def generate_rollout(transition, decoder, data, context_length, horizon, device, stats, reset_interval=None):
+def _infer_latent_shape(hdf5_file: str, front_key: str, wrist_key: str) -> tuple[int, int]:
+    """Infer (num_patches, latent_dim) from first trajectory in HDF5."""
+    with h5py.File(hdf5_file, "r") as hf:
+        traj_ids = sorted(list(hf.keys()))
+        if not traj_ids:
+            raise ValueError(f"No trajectories found in {hdf5_file}")
+        traj = hf[traj_ids[0]]
+        if front_key not in traj:
+            raise KeyError(f"Front latent key '{front_key}' not found in trajectory '{traj_ids[0]}'")
+        if wrist_key not in traj:
+            raise KeyError(f"Wrist latent key '{wrist_key}' not found in trajectory '{traj_ids[0]}'")
+        front_shape = tuple(traj[front_key].shape)
+        wrist_shape = tuple(traj[wrist_key].shape)
+    if len(front_shape) != 3 or len(wrist_shape) != 3:
+        raise ValueError(
+            "Expected latent tensors with shape (T, num_patches, dim). "
+            f"Got front={front_shape}, wrist={wrist_shape}"
+        )
+    if front_shape[1:] != wrist_shape[1:]:
+        raise ValueError(
+            "Front and wrist latent shapes must match. "
+            f"Got front={front_shape[1:]}, wrist={wrist_shape[1:]}"
+        )
+    return int(front_shape[1]), int(front_shape[2])
+
+
+class DinoDecoderAdapter:
+    def __init__(self, decoder: VQVAE):
+        self.decoder = decoder
+
+    @torch.no_grad()
+    def decode_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        # tokens: (B, T, N, D) -> (B, T, H, W, C) in [0, 1]
+        pred_ims, _ = self.decoder(tokens)
+        pred_ims = rearrange(pred_ims, "(b t) c h w -> b t h w c", t=tokens.shape[1])
+        return pred_ims.clamp(0.0, 1.0)
+
+
+class WanDecoderAdapter:
+    def __init__(
+        self,
+        *,
+        model: str,
+        subfolder: str,
+        device: str,
+        dtype: str,
+        latent_h: int = 0,
+        latent_w: int = 0,
+    ):
+        from diffusers import AutoencoderKLWan
+
+        dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+        self.device = torch.device(device if device != "cuda" or torch.cuda.is_available() else "cpu")
+        self.model_dtype = dtype_map[dtype] if self.device.type == "cuda" else torch.float32
+        self.latent_h = int(latent_h)
+        self.latent_w = int(latent_w)
+        self.vae = AutoencoderKLWan.from_pretrained(
+            model, subfolder=subfolder, torch_dtype=self.model_dtype
+        ).to(self.device).eval()
+
+    def _infer_hw(self, num_patches: int) -> tuple[int, int]:
+        if self.latent_h > 0 and self.latent_w > 0:
+            if self.latent_h * self.latent_w != num_patches:
+                raise ValueError(
+                    f"wan_latent_height*wan_latent_width ({self.latent_h*self.latent_w}) "
+                    f"must equal num_patches ({num_patches})."
+                )
+            return self.latent_h, self.latent_w
+        side = int(np.sqrt(num_patches))
+        if side * side != num_patches:
+            raise ValueError(
+                "Cannot infer WAN latent H/W from non-square num_patches. "
+                "Set --wan-latent-height and --wan-latent-width explicitly."
+            )
+        return side, side
+
+    @torch.no_grad()
+    def decode_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        # tokens: (B, T, N, C) -> image tensor (B, T, H, W, 3) in [0, 1]
+        _, _, n, _ = tokens.shape
+        h, w = self._infer_hw(n)
+        z = rearrange(tokens, "b t (h w) c -> b c t h w", h=h, w=w).to(
+            device=self.device, dtype=self.model_dtype
+        )
+        y = self.vae.decode(z).sample
+        y = y.clamp(-1, 1).add(1.0).mul(0.5)
+        return rearrange(y, "b c t h w -> b t h w c").float()
+
+
+def generate_rollout(transition, decoder_adapter, data, context_length, horizon, device, stats, render_size, reset_interval=None):
     """
     Generate a single rollout.
     
     Args:
         transition: World model (VideoTransformer)
-        decoder: VQVAE decoder
+        decoder_adapter: Decoder adapter with decode_tokens()
         data: Batch from dataset
         context_length: Number of context frames H
         horizon: Number of rollout steps
@@ -120,8 +209,8 @@ def generate_rollout(transition, decoder, data, context_length, horizon, device,
     # Initialize with context images
     im1s = data['agentview_image'][[0], :H].squeeze().to(device) / 255.  # (T, H, W, C)
     im2s = data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device) / 255.
-    im1s = F.interpolate(im1s.permute(0, 3, 1, 2), size=MODEL_CONFIG['image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-    im2s = F.interpolate(im2s.permute(0, 3, 1, 2), size=MODEL_CONFIG['image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+    im1s = F.interpolate(im1s.permute(0, 3, 1, 2), size=render_size, mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+    im2s = F.interpolate(im2s.permute(0, 3, 1, 2), size=render_size, mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
     
     # Track predicted states (for plotting)
     pred_states = [all_states_raw[0, :H]]
@@ -156,10 +245,20 @@ def generate_rollout(transition, decoder, data, context_length, horizon, device,
         pred1, pred2, pred_state, _ = transition(inputs1, inputs2, inputs_states, acs)
         
         # Decode predictions
-        pred_latent = torch.cat([pred1[:, [-1]], pred2[:, [-1]]], dim=0)
-        pred_ims, _ = decoder(pred_latent)
-        pred_ims = rearrange(pred_ims, "(b t) c h w -> b t h w c", t=1)
-        pred_im1, pred_im2 = torch.split(pred_ims, [inputs1.shape[0], inputs2.shape[0]], dim=0)
+        pred_im1 = decoder_adapter.decode_tokens(pred1[:, [-1]])
+        pred_im2 = decoder_adapter.decode_tokens(pred2[:, [-1]])
+        pred_im1 = F.interpolate(
+            pred_im1.squeeze(1).permute(0, 3, 1, 2),
+            size=render_size,
+            mode='bilinear',
+            align_corners=False,
+        ).permute(0, 2, 3, 1).unsqueeze(1)
+        pred_im2 = F.interpolate(
+            pred_im2.squeeze(1).permute(0, 3, 1, 2),
+            size=render_size,
+            mode='bilinear',
+            align_corners=False,
+        ).permute(0, 2, 3, 1).unsqueeze(1)
         
         im1s = torch.cat([im1s, pred_im1.squeeze(0)], dim=0)
         im2s = torch.cat([im2s, pred_im2.squeeze(0)], dim=0)
@@ -185,8 +284,8 @@ def generate_rollout(transition, decoder, data, context_length, horizon, device,
     total_length = H + horizon
     gt_im1 = data['agentview_image'][[0], :total_length].squeeze().to(device)
     gt_im2 = data['robot0_eye_in_hand_image'][[0], :total_length].squeeze().to(device)
-    gt_im1 = F.interpolate(gt_im1.permute(0, 3, 1, 2).float(), size=MODEL_CONFIG['image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-    gt_im2 = F.interpolate(gt_im2.permute(0, 3, 1, 2).float(), size=MODEL_CONFIG['image_size'], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+    gt_im1 = F.interpolate(gt_im1.permute(0, 3, 1, 2).float(), size=render_size, mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+    gt_im2 = F.interpolate(gt_im2.permute(0, 3, 1, 2).float(), size=render_size, mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
     gt_im1 = gt_im1.squeeze(0) / 255.  # (T, H, W, C)
     gt_im2 = gt_im2.squeeze(0) / 255.
     
@@ -273,22 +372,42 @@ def plot_state_rollout(gt_states: torch.Tensor, pred_states: torch.Tensor, outpu
     plt.close(fig)
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Generate world model rollouts")
     parser.add_argument("--wm-checkpoint", type=str, required=True,
                        help="Path to world model checkpoint")
-    parser.add_argument("--decoder-checkpoint", type=str, required=True,
-                       help="Path to decoder checkpoint")
+    parser.add_argument("--decoder-checkpoint", type=str, default=None,
+                       help="Path to DINO decoder checkpoint (required when --backbone=dino)")
     parser.add_argument("--hdf5-file", type=str, required=True,
                        help="Path to HDF5 dataset file")
     parser.add_argument("--dataset-stats", type=str, required=True,
                        help="Path to dataset statistics JSON file")
+    parser.add_argument("--backbone", type=str, default="dino", choices=["dino", "wan"],
+                       help="Backbone flow to use: dino or wan (default: dino)")
+    parser.add_argument("--dino-version", type=str, default="v3", choices=["v2", "v3"],
+                       help="DINO version used when --backbone=dino (default: v3)")
+    parser.add_argument("--front-latent-key", type=str, default="cam_zed_embd",
+                       help="HDF5 key for front camera latents (default: cam_zed_embd)")
+    parser.add_argument("--wrist-latent-key", type=str, default="cam_rs_embd",
+                       help="HDF5 key for wrist camera latents (default: cam_rs_embd)")
+    parser.add_argument("--wan-vae-model", type=str, default=None,
+                       help="Diffusers WAN VAE model id/path (required when --backbone=wan)")
+    parser.add_argument("--wan-vae-subfolder", type=str, default="vae",
+                       help="WAN VAE subfolder (default: vae)")
+    parser.add_argument("--wan-vae-dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"],
+                       help="WAN VAE dtype (default: bf16)")
+    parser.add_argument("--wan-latent-height", type=int, default=0,
+                       help="WAN latent height for decode (0 = infer square)")
+    parser.add_argument("--wan-latent-width", type=int, default=0,
+                       help="WAN latent width for decode (0 = infer square)")
     parser.add_argument("--horizon", type=int, default=10,
                        help="Rollout horizon (default: 10)")
     parser.add_argument("--context-length", type=int, default=3,
                        help="Context length H (default: 3)")
     parser.add_argument("--sequence-length", type=int, default=4,
                        help="Sequence length used during training (default: 4). This determines num_frames=sequence_length-1.")
+    parser.add_argument("--action-horizon", type=int, default=100,
+                       help="Action horizon used by VideoTransformer checkpoint compatibility (default: 100).")
     parser.add_argument("--reset-interval", type=int, default=None,
                        help="Reset with fresh GT context every N steps (Option B: full context reset). "
                             "Useful for long rollouts to prevent error accumulation. Default: None (no resets).")
@@ -304,8 +423,25 @@ def main():
                        help="Random seed for trajectory selection. Use the same seed for different checkpoints to ensure same trajectories are used for comparison (default: None, random)")
     parser.add_argument("--quantize", action="store_true",
                         help="Enable VQ codebook quantization (must match training setting)")
-    
-    args = parser.parse_args()
+    parser.add_argument("--render-height", type=int, default=224,
+                        help="Rendered comparison image height (default: 224)")
+    parser.add_argument("--render-width", type=int, default=224,
+                        help="Rendered comparison image width (default: 224)")
+    return parser.parse_args(argv)
+
+
+def validate_args(args):
+    if args.backbone == "dino" and not args.decoder_checkpoint:
+        raise ValueError("--decoder-checkpoint is required when --backbone=dino")
+    if args.backbone == "wan" and not args.wan_vae_model:
+        raise ValueError("--wan-vae-model is required when --backbone=wan")
+    if args.render_height <= 0 or args.render_width <= 0:
+        raise ValueError("--render-height and --render-width must be > 0")
+
+
+def main():
+    args = parse_args()
+    validate_args(args)
     
     # Set random seed for reproducibility
     if args.seed is not None:
@@ -316,6 +452,7 @@ def main():
         print(f"Using random seed: {args.seed} (for reproducible trajectory selection)")
     
     device = args.device
+    render_size = (int(args.render_height), int(args.render_width))
     
     # Load dataset stats
     print(f"Loading dataset stats from {args.dataset_stats}")
@@ -345,20 +482,48 @@ def main():
     
     # Load models
     print("Loading models...")
-    dec_state, dec_meta = _load_state_dict_with_meta(args.decoder_checkpoint, device)
-    quantize = bool(args.quantize) if args.quantize else _resolve_quantize_flag(dec_meta, args.decoder_checkpoint)
-    decoder = VQVAE(quantize=quantize).to(device)
-    if quantize:
-        print("VQ codebook quantization enabled")
+    backbone = str(args.backbone)
+    latent_num_patches = None
+    if backbone == "dino":
+        dino_cfg = get_dino_config(args.dino_version)
+        MODEL_CONFIG['dim'] = int(dino_cfg['dim'])
+        MODEL_CONFIG['image_size'] = get_decoder_image_size(args.dino_version)
+        dec_state, dec_meta = _load_state_dict_with_meta(args.decoder_checkpoint, device)
+        quantize = bool(args.quantize) if args.quantize else _resolve_quantize_flag(dec_meta, args.decoder_checkpoint)
+        decoder = VQVAE(quantize=quantize).to(device)
+        if quantize:
+            print("VQ codebook quantization enabled")
+        else:
+            print("VQ codebook quantization disabled (standard autoencoder)")
+        decoder.load_state_dict(dec_state)
+        decoder.eval()
+        decoder_adapter = DinoDecoderAdapter(decoder)
     else:
-        print("VQ codebook quantization disabled (standard autoencoder)")
-    decoder.load_state_dict(dec_state)
-    decoder.eval()
-    
+        latent_num_patches, latent_dim = _infer_latent_shape(
+            args.hdf5_file, args.front_latent_key, args.wrist_latent_key
+        )
+        MODEL_CONFIG['dim'] = int(latent_dim)
+        MODEL_CONFIG['image_size'] = (224, 224)
+        decoder_adapter = WanDecoderAdapter(
+            model=args.wan_vae_model,
+            subfolder=args.wan_vae_subfolder,
+            device=device,
+            dtype=args.wan_vae_dtype,
+            latent_h=args.wan_latent_height,
+            latent_w=args.wan_latent_width,
+        )
+        print(
+            f"WAN backbone active: latent num_patches={latent_num_patches}, dim={latent_dim}, model={args.wan_vae_model}"
+        )
+
     transition = VideoTransformer(
         state_dim=state_dim,
         action_dim=action_dim,
         num_frames=args.sequence_length - 1,  # Must match training: sequence_length - 1
+        action_horizon=int(args.action_horizon),
+        backbone=backbone,
+        dino_version=args.dino_version,
+        num_patches=latent_num_patches,
         **MODEL_CONFIG
     ).to(device)
     wm_state, _ = _load_state_dict_with_meta(args.wm_checkpoint, device)
@@ -374,7 +539,9 @@ def main():
         args.hdf5_file,
         segment_length=args.context_length + args.horizon,
         split='train',
-        num_test=0
+        num_test=0,
+        front_embd_key=args.front_latent_key,
+        wrist_embd_key=args.wrist_latent_key,
     )
     
     # Create output directory
@@ -423,7 +590,15 @@ def main():
         
         with torch.no_grad():
             gt_im1, gt_im2, pred_im1, pred_im2, gt_states, pred_states = generate_rollout(
-                transition, decoder, data, args.context_length, args.horizon, device, stats, args.reset_interval
+                transition,
+                decoder_adapter,
+                data,
+                args.context_length,
+                args.horizon,
+                device,
+                stats,
+                render_size,
+                args.reset_interval,
             )
             
             video = create_comparison_video(gt_im1, gt_im2, pred_im1, pred_im2)
