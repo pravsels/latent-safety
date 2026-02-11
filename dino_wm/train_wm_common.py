@@ -349,6 +349,8 @@ def run_train_eval_loop(
         }
 
     current_best_eval = float(best_eval)
+    # Ensure checkpoint path exists before periodic latest checkpoint saves.
+    os.makedirs(checkpoint_dir, exist_ok=True)
     for i in tqdm(range(start_iter, train_iter), desc="Training", unit="iter"):
         lr_factor = compute_lr_factor(
             step=i,

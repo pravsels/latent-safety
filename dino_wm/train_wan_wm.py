@@ -37,7 +37,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from dino_models import VideoTransformer, normalize_acs, normalize_states
+from dino_wm.dino_models import VideoTransformer, normalize_acs, normalize_states
 from dino_wm.checkpoint_utils import filter_state_dict_by_shape
 from dino_wm.config import DECODER_CONFIG, MODEL_CONFIG
 from dino_wm.train_wm_common import (
@@ -49,7 +49,7 @@ from dino_wm.train_wm_common import (
     resolve_wm_checkpoint,
     run_train_eval_loop,
 )
-from test_loader import SplitTrajectoryDataset
+from dino_wm.test_loader import SplitTrajectoryDataset
 
 
 def infer_latent_shape(hdf5_file: str, front_key: str, wrist_key: str) -> tuple[int, int]:
