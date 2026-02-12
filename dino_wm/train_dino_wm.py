@@ -273,6 +273,37 @@ def sample_future_action_window(
 def parse_args(argv=None):
     if argv is None:
         argv = sys.argv[1:]
+
+def _load_state_dict_with_meta(path: str, device: str):
+    """
+    Load checkpoint and return (state_dict, meta_dict).
+    Supports raw state_dict or dict checkpoints with common keys.
+    """
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    if isinstance(ckpt, dict):
+        for key in ("model_state_dict", "decoder_state_dict", "state_dict"):
+            if key in ckpt:
+                meta = {k: v for k, v in ckpt.items() if k != key}
+                return ckpt[key], meta
+    return ckpt, {}
+
+
+def _resolve_quantize_flag(ckpt_meta: dict, checkpoint_path: str) -> bool:
+    """
+    Decide whether to enable VQ codebook quantization.
+    Priority:
+      1) checkpoint metadata key "quantize"
+      2) filename heuristic: "_vq" in basename
+      3) default False
+    """
+    if isinstance(ckpt_meta, dict) and "quantize" in ckpt_meta:
+        return bool(ckpt_meta["quantize"])
+    if "_vq" in os.path.basename(checkpoint_path):
+        return True
+    return False
+
+
+def main():
     # Parse config path first so we can apply YAML values as argparse defaults.
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument(
@@ -654,6 +685,7 @@ def main():
     MODEL_CONFIG['image_size'] = decoder_img_size
     DECODER_CONFIG['decoder_image_size'] = decoder_img_size
 
+<<<<<<< HEAD
     # Load decoder
     decoder = VQVAE().to(device)
     decoder_ckpt = torch.load(args.decoder_checkpoint, map_location=device)
@@ -672,8 +704,15 @@ def main():
         print(f"Warning: decoder has {len(unexpected)} unexpected keys in checkpoint.")
     if mismatched:
         print(f"Warning: decoder skipped {len(mismatched)} mismatched keys.")
+=======
+    # Load decoder (supports both raw state_dict and wrapped checkpoint dicts)
+    dec_state, dec_meta = _load_state_dict_with_meta(args.decoder_checkpoint, device)
+    quantize = _resolve_quantize_flag(dec_meta, args.decoder_checkpoint)
+    decoder = VQVAE(quantize=quantize).to(device)
+    decoder.load_state_dict(dec_state)
+>>>>>>> 8547f98db1f2af49ac7218b48ee8cd7eb2d48025
     decoder.eval()
-    print(f"Loaded decoder from {args.decoder_checkpoint}")
+    print(f"Loaded decoder from {args.decoder_checkpoint} (quantize={quantize})")
 
     # Initialize world model
     transition = VideoTransformer(
