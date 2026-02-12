@@ -444,7 +444,10 @@ def main(argv=None):
     ).to(device)
 
     if is_distributed:
-        transition = DistributedDataParallel(transition, device_ids=[local_rank])
+        # find_unused_parameters=True is needed because:
+        # 1) failure_head is frozen (no gradients)
+        # 2) training loop does two forward passes (TF + AR) before one backward()
+        transition = DistributedDataParallel(transition, device_ids=[local_rank], find_unused_parameters=True)
     transition_module = transition.module if is_distributed else transition
 
     # failure_head is trained separately by classifier scripts.

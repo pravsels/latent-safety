@@ -439,6 +439,61 @@ This works for both setups:
 
 ---
 
+## Issue 12: DDP Needs `find_unused_parameters=True`
+
+The training loop crashes on the second iteration with:
+
+```
+RuntimeError: Expected to have finished reduction in the prior iteration
+before starting a new one. This error indicates that your module has
+parameters that were not used in producing loss.
+```
+
+Two reasons:
+
+1. **Frozen `failure_head`:** `freeze_failure_head_for_wm_training()` sets
+   `requires_grad=False` on all failure_head parameters. DDP expects every
+   parameter to receive gradients during backward. The frozen parameters
+   never do.
+
+2. **Two forward passes per iteration:** The training loop runs two forward
+   passes through the DDP model (teacher forcing + autoregressive) before
+   a single `backward()`. DDP hooks into each forward pass to track which
+   parameters need reduction. When the second forward starts before the
+   first's reduction completes, DDP raises an error.
+
+`find_unused_parameters=True` tells DDP to dynamically figure out which
+parameters participate in the backward pass, rather than assuming all of
+them do. This handles both the frozen head and the double-forward pattern.
+
+```python
+DistributedDataParallel(transition, device_ids=[local_rank], find_unused_parameters=True)
+```
+
+Note: this has a small performance overhead (DDP must traverse the
+autograd graph after each backward to mark unused params). If we later
+remove the double-forward pattern or unfreeze the failure_head, we could
+remove this flag.
+
+---
+
+## Issue 13: NCCL Topology Detection Fails With `--gpus-per-task=1`
+
+With `srun --gpus-per-task=1`, SLURM uses cgroup isolation so each task
+only sees 1 GPU. NCCL uses NVML to discover GPU topology (NVLink vs PCIe
+layout), but the cgroup hides the other GPUs from NVML:
+
+```
+nvmlDeviceGetHandleByPciBusId() failed: Not Found
+```
+
+The fix: remove `--gpus-per-task=1` from `srun` so all tasks see all GPUs
+from the job-level `--gres=gpu:4`. Each task picks its own GPU via
+`LOCAL_RANK`, and NCCL can see the full topology for inter-GPU
+communication. GPU 3 sits idle.
+
+---
+
 ## Fix Checklist
 
 - [x] **1 (P0):** Add DDP env vars (`RANK`/`WORLD_SIZE`/`LOCAL_RANK`/`MASTER_ADDR`/`MASTER_PORT`) to `slurm/train_dinowm.sh`
@@ -452,3 +507,5 @@ This works for both setups:
 - [x] **9 (P3):** ~Avoid constructing eval datasets on non-rank0~ -- **deferred**: datasets are lightweight index wrappers; actual data is only loaded on rank0 during eval. Adding conditional construction would add complexity for negligible savings.
 - [x] **10 (P0):** Resolve `MASTER_ADDR` on the host before `srun` (not inside the container where `scontrol` is unavailable) in `slurm/train_dinowm.sh` and `slurm/train_wan_wm.sh`
 - [x] **11 (P0):** Clamp `local_rank` to `% torch.cuda.device_count()` in `init_distributed_from_env()` to handle SLURM cgroup GPU isolation (`dino_wm/train_wm_common.py`)
+- [x] **12 (P0):** Add `find_unused_parameters=True` to DDP wrapper in `dino_wm/train_dino_wm.py` and `dino_wm/train_wan_wm.py` (frozen failure_head + double forward pass)
+- [x] **13 (P0):** Remove `--gpus-per-task=1` from `srun` in `slurm/train_dinowm.sh` and `slurm/train_wan_wm.sh` (NCCL can't detect topology with cgroup isolation)
