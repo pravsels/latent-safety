@@ -100,10 +100,15 @@ def init_distributed_from_env() -> tuple[int, int, int, bool]:
     # rank is between 0 and WORLD_SIZE-1
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
-    # local_rank is between 0 and NUM_GPUS-1, on this node
+    # local_rank is between 0 and NUM_GPUS_ON_THIS_NODE-1
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     is_distributed = world_size > 1
     if is_distributed:
+        # When SLURM uses --gpus-per-task=1, each task only sees 1 GPU via
+        # cgroup isolation (torch.cuda.device_count() == 1). LOCAL_RANK may
+        # still be >0 (from SLURM_LOCALID), so clamp to visible devices.
+        if torch.cuda.is_available():
+            local_rank = local_rank % torch.cuda.device_count()
         torch.distributed.init_process_group(
             backend="nccl",
             rank=rank,

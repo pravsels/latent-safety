@@ -1,4 +1,12 @@
-# DDP (DistributedDataParallel) Issues in This Repo
+# DDP Issues in This Repo
+
+**Glossary of acronyms:**
+- **DDP** -- DistributedDataParallel (PyTorch's multi-GPU training wrapper)
+- **NCCL** -- NVIDIA Collective Communications Library (handles GPU-to-GPU communication: all-reduce, broadcast, etc.)
+- **FSDP** -- Fully Sharded Data Parallel (alternative to DDP that shards model parameters across GPUs)
+- **SLURM** -- Simple Linux Utility for Resource Management (HPC job scheduler)
+- **NVLink** -- NVIDIA's high-bandwidth GPU-to-GPU interconnect on the same node
+- **PCIe** -- Peripheral Component Interconnect Express (fallback GPU interconnect, slower than NVLink)
 
 Audit of multi-GPU training compared to [openpi](../openpi), which produces
 clean single-stream logs and a single wandb run even across 3 GPUs.
@@ -39,9 +47,57 @@ in multi-node setups. Example with 2 nodes, 3 GPUs each (6 processes):
 `RANK` is used for logic guards (`if rank == 0: log(...)`) and NCCL
 process identification.
 
+**Caveat with SLURM cgroup isolation:** The table above shows `LOCAL_RANK`
+as reported by `SLURM_LOCALID`. But when using `--gpus-per-task=1`, SLURM
+isolates GPUs via cgroups so each task only **sees 1 GPU**. From each
+task's perspective `torch.cuda.device_count() == 1` and only `cuda:0`
+exists, even though `SLURM_LOCALID` might be 1 or 2. That's why
+`init_distributed_from_env()` clamps with `local_rank % device_count()`
+-- see Issue 11 for details.
+
 When any of these are missing, `init_distributed_from_env()` falls through to
 `WORLD_SIZE=1` and DDP is never initialised. Each process runs as an
 independent single-GPU training job.
+
+### How DDP Actually Works (Peer-to-Peer, No Master)
+
+There is no master process during training. All ranks are equals.
+
+**Startup (rendezvous):** `MASTER_ADDR`/`MASTER_PORT` are used *only once*
+for the initial handshake. Rank 0 opens a TCP socket on that address/port,
+ranks 1 and 2 connect to it, they exchange GPU topology info, and the
+NCCL communication group is formed. After this, `MASTER_ADDR` is never
+used again.
+
+**During training, each process independently:**
+1. Loads its own batch (different data, thanks to `DistributedSampler`)
+2. Runs forward pass on its own GPU
+3. Computes its own loss and gradients
+
+**Gradient all-reduce:** NCCL then performs an **all-reduce** across all
+GPUs. This is not a "master collects and redistributes" pattern -- it's a
+ring algorithm where each GPU sends a chunk to its neighbor, receives a
+chunk from the other side, accumulates, and passes it on:
+
+```
+GPU 0 ──gradients──> GPU 1 ──gradients──> GPU 2
+  ^                                         |
+  └─────────────gradients───────────────────┘
+```
+
+After one full loop, all 3 GPUs have the exact same **averaged** gradient.
+No single GPU did all the work.
+
+**After all-reduce:** Each process applies the identical averaged gradient
+to its own copy of the model weights via `optimizer.step()`. Since they
+all started with the same weights and applied the same gradient, the
+models stay in sync.
+
+**Rank 0 is only "special" for I/O:** logging, wandb, checkpoint saving.
+That's a convention we enforce with `if is_rank0:`. From NCCL's
+perspective, rank 0 is no different from rank 1 or 2. `RANK` doesn't mean
+"rank 0 is the boss" -- it just means "you are process number N in a
+group of peers."
 
 ---
 
@@ -318,6 +374,71 @@ and avoids hanging processes if NCCL cleanup fails.
 
 ---
 
+## Issue 10: `scontrol` Not Available Inside Apptainer Container
+
+The SLURM scripts originally resolved `MASTER_ADDR` inside the container:
+
+```bash
+export MASTER_ADDR=\$(scontrol show hostnames \${SLURM_NODELIST} | head -n 1)
+```
+
+`scontrol` is a SLURM host-side command and does not exist inside the
+Apptainer container. The command substitution silently failed, leaving
+`MASTER_ADDR` empty, which caused `init_process_group` to crash with:
+
+```
+ValueError: Error initializing torch.distributed using env:// rendezvous:
+environment variable MASTER_ADDR expected, but not set
+```
+
+The fix: resolve `MASTER_ADDR` on the **host** before `srun`, then pass
+the literal value into the container's `bash -c` string.
+
+Note: `SLURM_PROCID`, `SLURM_NTASKS`, and `SLURM_LOCALID` do **not** have
+this problem -- they are environment variables injected by `srun` into
+each task, and they propagate into the container automatically. Only
+`scontrol` (a command, not a variable) is unavailable inside the container.
+
+---
+
+## Issue 11: `LOCAL_RANK` vs SLURM cgroup GPU Isolation
+
+With `--gpus-per-task=1`, SLURM uses cgroup isolation so each task only
+sees **one GPU**. From each task's perspective, `torch.cuda.device_count()`
+returns 1 and only `cuda:0` exists. But `LOCAL_RANK` (from `SLURM_LOCALID`)
+is 0, 1, 2 -- so ranks 1 and 2 tried `torch.cuda.set_device(1)` and
+`torch.cuda.set_device(2)`, which don't exist:
+
+```
+RuntimeError: CUDA error: invalid device ordinal
+```
+
+The root cause is that `LOCAL_RANK` means "which GPU on this node" in the
+multi-GPU-visible sense, but with cgroup isolation each task's "node" only
+has 1 GPU.
+
+| Task | `RANK` | `LOCAL_RANK` (SLURM) | Visible GPUs | Physical GPU | `local_rank` after fix |
+|------|--------|----------------------|-------------|-------------|----------------------|
+| 0 | 0 | 0 | 1 (`cuda:0`) | GPU 0 | 0 |
+| 1 | 1 | 1 | 1 (`cuda:0`) | GPU 1 | 0 |
+| 2 | 2 | 2 | 1 (`cuda:0`) | GPU 2 | 0 |
+
+Each task sees only its own GPU as `cuda:0`, but NCCL still knows about
+all physical GPUs at the hardware level for inter-GPU communication.
+
+The fix in `init_distributed_from_env()`:
+
+```python
+if torch.cuda.is_available():
+    local_rank = local_rank % torch.cuda.device_count()
+```
+
+This works for both setups:
+- **SLURM cgroup isolation** (`device_count=1`): `local_rank % 1 = 0` for all tasks
+- **All GPUs visible** (torchrun, no isolation, `device_count=3`): `local_rank % 3` stays 0, 1, 2
+
+---
+
 ## Fix Checklist
 
 - [x] **1 (P0):** Add DDP env vars (`RANK`/`WORLD_SIZE`/`LOCAL_RANK`/`MASTER_ADDR`/`MASTER_PORT`) to `slurm/train_dinowm.sh`
@@ -329,3 +450,5 @@ and avoids hanging processes if NCCL cleanup fails.
 - [x] **7 (P2):** Remove or fix `CUDA_VISIBLE_DEVICES` in `slurm/train_dinowm.sh`
 - [x] **8 (P2):** Add `dist.destroy_process_group()` cleanup in `dino_wm/train_dino_wm.py` and `dino_wm/train_wan_wm.py`
 - [x] **9 (P3):** ~Avoid constructing eval datasets on non-rank0~ -- **deferred**: datasets are lightweight index wrappers; actual data is only loaded on rank0 during eval. Adding conditional construction would add complexity for negligible savings.
+- [x] **10 (P0):** Resolve `MASTER_ADDR` on the host before `srun` (not inside the container where `scontrol` is unavailable) in `slurm/train_dinowm.sh` and `slurm/train_wan_wm.sh`
+- [x] **11 (P0):** Clamp `local_rank` to `% torch.cuda.device_count()` in `init_distributed_from_env()` to handle SLURM cgroup GPU isolation (`dino_wm/train_wm_common.py`)
