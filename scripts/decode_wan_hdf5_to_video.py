@@ -41,30 +41,40 @@ def _load_wan_vae(model_id: str, subfolder: str, device: str, dtype: str):
     return vae, dev, model_dtype
 
 
-def _infer_latent_hw(num_patches: int, latent_h: int = 0, latent_w: int = 0) -> tuple[int, int]:
-    """Recover spatial grid dimensions from flattened patch count."""
+SPATIAL_DOWNSAMPLE = 8  # Wan VAE spatial compression factor
+
+
+def _infer_latent_hw_from_camera(
+    grp: h5py.Group, num_patches: int,
+    latent_h: int = 0, latent_w: int = 0,
+    crop_multiple: int = 8,
+) -> tuple[int, int]:
+    """Derive latent grid (h, w) from the raw camera resolution in the HDF5 group."""
     if latent_h > 0 and latent_w > 0:
         assert latent_h * latent_w == num_patches, (
             f"latent_h*latent_w ({latent_h * latent_w}) != num_patches ({num_patches})"
         )
         return latent_h, latent_w
-    side = int(math.isqrt(num_patches))
-    if side * side == num_patches:
-        return side, side
-    # Try common aspect ratios (3:4, 9:16, etc.)
-    for h_candidate in range(1, num_patches + 1):
-        if num_patches % h_candidate == 0:
-            w_candidate = num_patches // h_candidate
-            if abs(h_candidate - w_candidate) < abs(side - (num_patches // max(side, 1))):
-                # Keep searching for a more square-ish factorization
-                pass
-    # Fallback: find factor pair closest to square
-    best_h, best_w = 1, num_patches
-    for h_candidate in range(1, int(math.isqrt(num_patches)) + 1):
-        if num_patches % h_candidate == 0:
-            best_h = h_candidate
-            best_w = num_patches // h_candidate
-    return best_h, best_w
+
+    # Read camera shape to get the actual image H, W
+    for cam_key in ("camera_0", "camera_1"):
+        if cam_key in grp:
+            cam_shape = grp[cam_key].shape  # (T, H, W, C)
+            img_h, img_w = int(cam_shape[1]), int(cam_shape[2])
+            # Reproduce the center-crop-to-multiple logic from add_wan_embeds_to_hdf5.py
+            crop_h = (img_h // crop_multiple) * crop_multiple
+            crop_w = (img_w // crop_multiple) * crop_multiple
+            lh = crop_h // SPATIAL_DOWNSAMPLE
+            lw = crop_w // SPATIAL_DOWNSAMPLE
+            if lh * lw == num_patches:
+                return lh, lw
+            # If it doesn't match, keep trying the other camera
+            continue
+
+    raise ValueError(
+        f"Cannot infer latent H/W: no camera dataset found or num_patches={num_patches} "
+        f"doesn't match camera resolution. Pass --latent-height and --latent-width explicitly."
+    )
 
 
 @torch.no_grad()
@@ -128,7 +138,7 @@ def main():
     parser.add_argument("--output-dir", default="outputs/wan_decoded", help="Output directory")
     parser.add_argument("--model", default="ByteDance/Video-As-Prompt-Wan2.1-14B", help="WAN VAE model")
     parser.add_argument("--subfolder", default="vae")
-    parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"])
+    parser.add_argument("--dtype", default="fp32", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--front-key", default="wan_front_embd")
     parser.add_argument("--wrist-key", default="wan_wrist_embd")
@@ -136,7 +146,7 @@ def main():
     parser.add_argument("--latent-width", type=int, default=0, help="Latent grid W (0=auto)")
     parser.add_argument("--fps", type=float, default=20.0)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--max-trajectories", type=int, default=0, help="0=all")
+    parser.add_argument("--max-trajectories", type=int, default=1, help="0=all")
     parser.add_argument("--max-frames", type=int, default=0, help="0=all frames per trajectory")
     args = parser.parse_args()
 
@@ -171,7 +181,9 @@ def main():
             latent_dim = front_latents.shape[2]
             T = front_latents.shape[0]
 
-            latent_h, latent_w = _infer_latent_hw(num_patches, args.latent_height, args.latent_width)
+            latent_h, latent_w = _infer_latent_hw_from_camera(
+                grp, num_patches, args.latent_height, args.latent_width,
+            )
 
             print(f"  {traj_key}: {T} frames, latent ({latent_h}x{latent_w})x{latent_dim}, "
                   f"num_patches={num_patches}")

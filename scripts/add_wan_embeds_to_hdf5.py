@@ -145,7 +145,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--model", type=str, required=True, help="WAN VAE model id/path")
     parser.add_argument("--subfolder", type=str, default="vae")
-    parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
+    parser.add_argument("--dtype", type=str, default="fp32", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--crop-multiple", type=int, default=8)
     parser.add_argument("--front-key", type=str, default="wan_front_embd")
     parser.add_argument("--wrist-key", type=str, default="wan_wrist_embd")

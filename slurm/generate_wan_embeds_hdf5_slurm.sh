@@ -29,7 +29,7 @@ HF_TOKEN_FILE="${home_dir}/.hf_token"
 INPUT_HDF5="${data_dir}/arx5_datasets_6Feb_26.h5"
 OUTPUT_HDF5="${data_dir}/arx5_datasets_6Feb_26_wan.h5"
 WAN_MODEL="ByteDance/Video-As-Prompt-Wan2.1-14B"
-BATCH_SIZE=256
+BATCH_SIZE=128
 
 mkdir -p "${data_dir}" "${HF_CACHE}" "${PYTHON_EXT_DIR}" \
   "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
@@ -48,7 +48,7 @@ GEN_CMD="python scripts/add_wan_embeds_to_hdf5.py \
     --output-hdf5 ${OUTPUT_HDF5} \
     --model ${WAN_MODEL} \
     --subfolder vae \
-    --dtype bf16 \
+    --dtype fp32 \
     --batch-size ${BATCH_SIZE} \
     --front-key wan_front_embd \
     --wrist-key wan_wrist_embd \
