@@ -323,9 +323,11 @@ def main(argv=None):
             latent_h=args.wan_latent_height,
             latent_w=args.wan_latent_width,
         )
-        print(f"Loaded WAN VAE decoder from {args.wan_vae_model}/{args.wan_vae_subfolder}")
+        if is_rank0:
+            print(f"Loaded WAN VAE decoder from {args.wan_vae_model}/{args.wan_vae_subfolder}")
     else:
-        print("WAN backbone selected without --wan-vae-model; eval image decoding will be skipped.")
+        if is_rank0:
+            print("WAN backbone selected without --wan-vae-model; eval image decoding will be skipped.")
 
     transition = VideoTransformer(
         state_dim=state_dim,
@@ -364,9 +366,11 @@ def main(argv=None):
             fallback = resolve_wm_checkpoint(args.checkpoint_dir)
             resume_path = fallback
             if resume_path is not None:
-                print(f"Warning: requested checkpoint missing; falling back to '{resume_path}'.")
+                if is_rank0:
+                    print(f"Warning: requested checkpoint missing; falling back to '{resume_path}'.")
             else:
-                print("Warning: no checkpoint found for resume; starting from scratch.")
+                if is_rank0:
+                    print("Warning: no checkpoint found for resume; starting from scratch.")
         else:
             raise FileNotFoundError(
                 f"Resume checkpoint '{resume_path}' not found. Use --auto-resume to allow fallback."
@@ -376,7 +380,8 @@ def main(argv=None):
 
     start_iter = int(args.start_iter)
     if resume_path is not None:
-        print(f"Resuming from checkpoint: {resume_path}")
+        if is_rank0:
+            print(f"Resuming from checkpoint: {resume_path}")
         ckpt = torch.load(resume_path, map_location=device)
         if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
             filtered, missing, unexpected, mismatched = filter_state_dict_by_shape(
@@ -384,17 +389,19 @@ def main(argv=None):
                 ckpt["model_state_dict"],
             )
             transition_module.load_state_dict(filtered, strict=False)
-            if missing:
-                print(f"Warning: missing {len(missing)} keys from checkpoint.")
-            if unexpected:
-                print(f"Warning: {len(unexpected)} unexpected keys in checkpoint.")
-            if mismatched:
-                print(f"Warning: {len(mismatched)} keys had shape mismatches and were skipped.")
+            if is_rank0:
+                if missing:
+                    print(f"Warning: missing {len(missing)} keys from checkpoint.")
+                if unexpected:
+                    print(f"Warning: {len(unexpected)} unexpected keys in checkpoint.")
+                if mismatched:
+                    print(f"Warning: {len(mismatched)} keys had shape mismatches and were skipped.")
             if "optimizer_state_dict" in ckpt and not (missing or mismatched):
                 try:
                     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
                 except Exception as e:
-                    print(f"Warning: failed to load optimizer state ({e}); continuing with fresh optimizer.")
+                    if is_rank0:
+                        print(f"Warning: failed to load optimizer state ({e}); continuing with fresh optimizer.")
             if "iter" in ckpt:
                 start_iter = int(ckpt["iter"]) + 1
             if "best_eval" in ckpt and best_eval == float("inf"):
@@ -470,9 +477,13 @@ def main(argv=None):
 
     if is_rank0:
         plt.legend()
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-    plt.savefig(os.path.join(args.checkpoint_dir, "training_curve.png"))
-    print(f"\nTraining complete. Best eval loss: {float(best_eval):.4f}")
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
+        plt.savefig(os.path.join(args.checkpoint_dir, "training_curve.png"))
+    if is_rank0:
+        print(f"\nTraining complete. Best eval loss: {float(best_eval):.4f}")
+
+    if is_distributed:
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

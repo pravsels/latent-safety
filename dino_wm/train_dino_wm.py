@@ -342,11 +342,13 @@ def main(argv=None):
         raise ValueError(f"--eval-samples must be >= 1 (got {args.eval_samples}).")
     if pred_step < 1:
         raise ValueError(f"--pred-step must be >= 1 (got {pred_step}).")
-    print("Backbone flow: dino | front_latent_key=cam_zed_embd | wrist_latent_key=cam_rs_embd")
+    if is_rank0:
+        print("Backbone flow: dino | front_latent_key=cam_zed_embd | wrist_latent_key=cam_rs_embd")
     
     # LOAD STATS
     stats_path = args.dataset_stats
-    print(f"Loading dataset stats from {stats_path}")
+    if is_rank0:
+        print(f"Loading dataset stats from {stats_path}")
     _, stats_tensors, state_dim, action_dim = load_stats_tensors(stats_path, device)
     action_min = stats_tensors["action_min"]
     action_max = stats_tensors["action_max"]
@@ -357,8 +359,9 @@ def main(argv=None):
     state_q02 = stats_tensors["state_q02"]
     state_q98 = stats_tensors["state_q98"]
     
-    print(f"Loaded state normalization stats from {stats_path}")
-    print(f"Inferred state_dim={state_dim}, action_dim={action_dim} from dataset stats")
+    if is_rank0:
+        print(f"Loaded state normalization stats from {stats_path}")
+        print(f"Inferred state_dim={state_dim}, action_dim={action_dim} from dataset stats")
 
     # Dataset setup
     hdf5_file = args.hdf5_file
@@ -382,9 +385,10 @@ def main(argv=None):
     num_traj = dataset_info["num_traj"]
     num_test = dataset_info["num_test"]
     
-    print(f"Dataset: {hdf5_file}")
-    print(f"  Train: {num_traj - num_test} trajectories")
-    print(f"  Eval:  {num_test} trajectories")
+    if is_rank0:
+        print(f"Dataset: {hdf5_file}")
+        print(f"  Train: {num_traj - num_test} trajectories")
+        print(f"  Eval:  {num_test} trajectories")
 
     train_loader, train_sampler = build_train_loader(
         expert_data,
@@ -416,14 +420,16 @@ def main(argv=None):
     )
 
     decoder.load_state_dict(filtered, strict=False)
-    if missing:
-        print(f"Warning: decoder missing {len(missing)} keys from checkpoint.")
-    if unexpected:
-        print(f"Warning: decoder has {len(unexpected)} unexpected keys in checkpoint.")
-    if mismatched:
-        print(f"Warning: decoder skipped {len(mismatched)} mismatched keys.")
+    if is_rank0:
+        if missing:
+            print(f"Warning: decoder missing {len(missing)} keys from checkpoint.")
+        if unexpected:
+            print(f"Warning: decoder has {len(unexpected)} unexpected keys in checkpoint.")
+        if mismatched:
+            print(f"Warning: decoder skipped {len(mismatched)} mismatched keys.")
     decoder.eval()
-    print(f"Loaded DINO decoder from {args.decoder_checkpoint}")
+    if is_rank0:
+        print(f"Loaded DINO decoder from {args.decoder_checkpoint}")
 
     # Initialize world model
     transition = VideoTransformer(
@@ -458,7 +464,8 @@ def main(argv=None):
         best_ckpt = torch.load(best_ckpt_path, map_location=device)
         if isinstance(best_ckpt, dict) and 'best_eval' in best_ckpt:
             best_eval = best_ckpt['best_eval']
-            print(f"Loaded previous best eval: {best_eval:.4f}")
+            if is_rank0:
+                print(f"Loaded previous best eval: {best_eval:.4f}")
 
     # Resume logic
     resume_path = args.resume_checkpoint
@@ -468,30 +475,34 @@ def main(argv=None):
         if os.path.basename(resume_path) == "best_wm.pth":
             fallback = _resolve_wm_checkpoint(args.checkpoint_dir)
             if fallback is not None:
-                print(
-                    f"Warning: requested '{resume_path}' not found; "
-                    f"falling back to '{fallback}'."
-                )
+                if is_rank0:
+                    print(
+                        f"Warning: requested '{resume_path}' not found; "
+                        f"falling back to '{fallback}'."
+                    )
                 resume_path = fallback
             else:
-                print(
-                    f"Warning: requested '{resume_path}' not found and no other checkpoints "
-                    f"exist in '{args.checkpoint_dir}'. Starting from scratch."
-                )
+                if is_rank0:
+                    print(
+                        f"Warning: requested '{resume_path}' not found and no other checkpoints "
+                        f"exist in '{args.checkpoint_dir}'. Starting from scratch."
+                    )
                 resume_path = None
         elif args.auto_resume:
             fallback = _resolve_wm_checkpoint(args.checkpoint_dir)
             if fallback is not None:
-                print(
-                    f"Warning: requested '{resume_path}' not found; "
-                    f"auto-resume enabled, falling back to '{fallback}'."
-                )
+                if is_rank0:
+                    print(
+                        f"Warning: requested '{resume_path}' not found; "
+                        f"auto-resume enabled, falling back to '{fallback}'."
+                    )
                 resume_path = fallback
             else:
-                print(
-                    f"Warning: requested '{resume_path}' not found and no checkpoints exist in "
-                    f"'{args.checkpoint_dir}'. Starting from scratch."
-                )
+                if is_rank0:
+                    print(
+                        f"Warning: requested '{resume_path}' not found and no checkpoints exist in "
+                        f"'{args.checkpoint_dir}'. Starting from scratch."
+                    )
                 resume_path = None
         else:
             raise FileNotFoundError(
@@ -505,7 +516,8 @@ def main(argv=None):
 
     start_iter = args.start_iter
     if resume_path is not None:
-        print(f"Resuming from checkpoint: {resume_path}")
+        if is_rank0:
+            print(f"Resuming from checkpoint: {resume_path}")
         ckpt = torch.load(resume_path, map_location=device)
         if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
             filtered, missing, unexpected, mismatched = filter_state_dict_by_shape(
@@ -513,20 +525,23 @@ def main(argv=None):
                 ckpt['model_state_dict'],
             )
             transition_module.load_state_dict(filtered, strict=False)
-            if missing:
-                print(f"Warning: missing {len(missing)} keys from checkpoint.")
-            if unexpected:
-                print(f"Warning: {len(unexpected)} unexpected keys in checkpoint.")
-            if mismatched:
-                print(f"Warning: {len(mismatched)} keys had shape mismatches and were skipped.")
+            if is_rank0:
+                if missing:
+                    print(f"Warning: missing {len(missing)} keys from checkpoint.")
+                if unexpected:
+                    print(f"Warning: {len(unexpected)} unexpected keys in checkpoint.")
+                if mismatched:
+                    print(f"Warning: {len(mismatched)} keys had shape mismatches and were skipped.")
             if 'optimizer_state_dict' in ckpt:
                 if missing or mismatched:
-                    print("Warning: skipping optimizer state due to partial model load.")
+                    if is_rank0:
+                        print("Warning: skipping optimizer state due to partial model load.")
                 else:
                     try:
                         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
                     except Exception as e:
-                        print(f"Warning: failed to load optimizer state ({e}); continuing with fresh optimizer.")
+                        if is_rank0:
+                            print(f"Warning: failed to load optimizer state ({e}); continuing with fresh optimizer.")
             if 'iter' in ckpt:
                 start_iter = int(ckpt['iter']) + 1
             if 'best_eval' in ckpt and best_eval == float('inf'):
@@ -537,14 +552,15 @@ def main(argv=None):
                 ckpt,
             )
             transition_module.load_state_dict(filtered, strict=False)
-            if missing:
-                print(f"Warning: missing {len(missing)} keys from checkpoint.")
-            if unexpected:
-                print(f"Warning: {len(unexpected)} unexpected keys in checkpoint.")
-            if mismatched:
-                print(f"Warning: {len(mismatched)} keys had shape mismatches and were skipped.")
-            if missing or mismatched:
-                print("Warning: skipping optimizer state due to partial model load.")
+            if is_rank0:
+                if missing:
+                    print(f"Warning: missing {len(missing)} keys from checkpoint.")
+                if unexpected:
+                    print(f"Warning: {len(unexpected)} unexpected keys in checkpoint.")
+                if mismatched:
+                    print(f"Warning: {len(mismatched)} keys had shape mismatches and were skipped.")
+                if missing or mismatched:
+                    print("Warning: skipping optimizer state due to partial model load.")
 
     transition.train()
 
@@ -618,11 +634,15 @@ def main(argv=None):
 
     if is_rank0:
         plt.legend()
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-    plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
+        plt.savefig(os.path.join(args.checkpoint_dir, 'training_curve.png'))
 
     best_eval_val = best_eval.item() if hasattr(best_eval, 'item') else best_eval
-    print(f"\nTraining complete. Best eval loss: {best_eval_val:.4f}")
+    if is_rank0:
+        print(f"\nTraining complete. Best eval loss: {best_eval_val:.4f}")
+
+    if is_distributed:
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

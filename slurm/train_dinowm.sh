@@ -82,7 +82,9 @@ apptainer exec --nv \
     "${container}" \
     bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
         export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
-        export CUDA_VISIBLE_DEVICES=0,1,2 && \
+        export RANK=\${SLURM_PROCID} WORLD_SIZE=\${SLURM_NTASKS} LOCAL_RANK=\${SLURM_LOCALID} && \
+        export MASTER_ADDR=\$(scontrol show hostnames \${SLURM_NODELIST} | head -n 1) && \
+        export MASTER_PORT=\${MASTER_PORT:-29500} && \
         if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"torchmetrics\") else 1)'; then \
             ${INSTALL_TORCHMETRICS_CMD}; \
         fi && ${STATS_CMD} && ${TRAIN_CMD}"

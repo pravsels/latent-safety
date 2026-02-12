@@ -97,8 +97,10 @@ def load_yaml_config(path: str) -> dict:
 
 
 def init_distributed_from_env() -> tuple[int, int, int, bool]:
-    rank = int(os.environ.get("RANK", "0"))
+    # rank is between 0 and WORLD_SIZE-1
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    # local_rank is between 0 and NUM_GPUS-1, on this node
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     is_distributed = world_size > 1
     if is_distributed:
@@ -378,7 +380,7 @@ def run_train_eval_loop(
     current_best_eval = float(best_eval)
     # Ensure checkpoint path exists before periodic latest checkpoint saves.
     os.makedirs(checkpoint_dir, exist_ok=True)
-    for i in tqdm(range(start_iter, train_iter), desc="Training", unit="iter"):
+    for i in tqdm(range(start_iter, train_iter), desc="Training", unit="iter", disable=not is_rank0):
         lr_factor = compute_lr_factor(
             step=i,
             total_steps=train_iter,
@@ -476,11 +478,12 @@ def run_train_eval_loop(
         scaler.update()
         weight_norm = global_weight_norm(transition_module.parameters())
 
-        print(
-            f"\rIter {i} | lr {optimizer.param_groups[0]['lr']:.2e} | TF {loss_tf:.4f} | AR {loss_ar:.4f} | grad {grad_norm:.2f} | weight {weight_norm:.2f}",
-            end="",
-            flush=True,
-        )
+        if is_rank0:
+            print(
+                f"\rIter {i} | lr {optimizer.param_groups[0]['lr']:.2e} | TF {loss_tf:.4f} | AR {loss_ar:.4f} | grad {grad_norm:.2f} | weight {weight_norm:.2f}",
+                end="",
+                flush=True,
+            )
         if is_rank0:
             wandb.log(
                 {
