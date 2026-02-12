@@ -74,7 +74,7 @@ echo "SLURM vars: SLURM_NODELIST=${SLURM_NODELIST}, SLURM_NTASKS=${SLURM_NTASKS}
 echo ""
 
 set +e
-srun --ntasks=3 --gpus-per-task=1 --cpu-bind=cores \
+srun --ntasks=3 --cpu-bind=cores \
 apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \
