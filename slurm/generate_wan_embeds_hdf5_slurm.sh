@@ -29,7 +29,7 @@ HF_TOKEN_FILE="${home_dir}/.hf_token"
 INPUT_HDF5="${data_dir}/arx5_datasets_6Feb_26.h5"
 OUTPUT_HDF5="${data_dir}/arx5_datasets_6Feb_26_wan.h5"
 WAN_MODEL="ByteDance/Video-As-Prompt-Wan2.1-14B"
-BATCH_SIZE=64
+BATCH_SIZE=256
 
 mkdir -p "${data_dir}" "${HF_CACHE}" "${PYTHON_EXT_DIR}" \
   "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
