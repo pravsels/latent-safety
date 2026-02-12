@@ -72,6 +72,13 @@ echo "Running stats and training..."
 echo "Command: ${STATS_CMD} && ${TRAIN_CMD}"
 echo ""
 
+# Resolve MASTER_ADDR on the host (scontrol is not available inside the container).
+MASTER_ADDR=$(scontrol show hostnames "${SLURM_NODELIST}" | head -n 1)
+MASTER_PORT="${MASTER_PORT:-29500}"
+echo "DDP env (host-side): MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
+echo "SLURM vars: SLURM_NODELIST=${SLURM_NODELIST}, SLURM_NTASKS=${SLURM_NTASKS}"
+echo ""
+
 set +e
 srun --ntasks=3 --gpus-per-task=1 --cpu-bind=cores \
 apptainer exec --nv \
@@ -83,8 +90,9 @@ apptainer exec --nv \
     bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
         export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
         export RANK=\${SLURM_PROCID} WORLD_SIZE=\${SLURM_NTASKS} LOCAL_RANK=\${SLURM_LOCALID} && \
-        export MASTER_ADDR=\$(scontrol show hostnames \${SLURM_NODELIST} | head -n 1) && \
-        export MASTER_PORT=\${MASTER_PORT:-29500} && \
+        export MASTER_ADDR=${MASTER_ADDR} && \
+        export MASTER_PORT=${MASTER_PORT} && \
+        echo \"[task \${RANK}] RANK=\${RANK} WORLD_SIZE=\${WORLD_SIZE} LOCAL_RANK=\${LOCAL_RANK} MASTER_ADDR=\${MASTER_ADDR} MASTER_PORT=\${MASTER_PORT}\" && \
         if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"torchmetrics\") else 1)'; then \
             ${INSTALL_TORCHMETRICS_CMD}; \
         fi && ${STATS_CMD} && ${TRAIN_CMD}"
