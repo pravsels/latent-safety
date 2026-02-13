@@ -48,7 +48,7 @@ GEN_CMD="python scripts/add_wan_embeds_to_hdf5.py \
     --output-hdf5 ${OUTPUT_HDF5} \
     --model ${WAN_MODEL} \
     --subfolder vae \
-    --dtype fp32 \
+    --dtype bf16 \
     --batch-size ${BATCH_SIZE} \
     --front-key wan_front_embd \
     --wrist-key wan_wrist_embd \

@@ -28,6 +28,8 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from dino_wm.config import WAN_CONFIG
+
 
 def _load_wan_vae(model_id: str, subfolder: str, device: str, dtype: str):
     from diffusers import AutoencoderKLWan
@@ -41,39 +43,25 @@ def _load_wan_vae(model_id: str, subfolder: str, device: str, dtype: str):
     return vae, dev, model_dtype
 
 
-SPATIAL_DOWNSAMPLE = 8  # Wan VAE spatial compression factor
-
-
-def _infer_latent_hw_from_camera(
-    grp: h5py.Group, num_patches: int,
+def _infer_latent_hw(
+    num_patches: int,
     latent_h: int = 0, latent_w: int = 0,
-    crop_multiple: int = 8,
 ) -> tuple[int, int]:
-    """Derive latent grid (h, w) from the raw camera resolution in the HDF5 group."""
+    """Derive latent grid (h, w). Default: 28x28 from WAN_CONFIG."""
     if latent_h > 0 and latent_w > 0:
         assert latent_h * latent_w == num_patches, (
             f"latent_h*latent_w ({latent_h * latent_w}) != num_patches ({num_patches})"
         )
         return latent_h, latent_w
 
-    # Read camera shape to get the actual image H, W
-    for cam_key in ("camera_0", "camera_1"):
-        if cam_key in grp:
-            cam_shape = grp[cam_key].shape  # (T, H, W, C)
-            img_h, img_w = int(cam_shape[1]), int(cam_shape[2])
-            # Reproduce the center-crop-to-multiple logic from add_wan_embeds_to_hdf5.py
-            crop_h = (img_h // crop_multiple) * crop_multiple
-            crop_w = (img_w // crop_multiple) * crop_multiple
-            lh = crop_h // SPATIAL_DOWNSAMPLE
-            lw = crop_w // SPATIAL_DOWNSAMPLE
-            if lh * lw == num_patches:
-                return lh, lw
-            # If it doesn't match, keep trying the other camera
-            continue
+    side = WAN_CONFIG['latent_side']  # 28
+    if side * side == num_patches:
+        return side, side
 
     raise ValueError(
-        f"Cannot infer latent H/W: no camera dataset found or num_patches={num_patches} "
-        f"doesn't match camera resolution. Pass --latent-height and --latent-width explicitly."
+        f"num_patches={num_patches} doesn't match expected {side}x{side}={side*side} "
+        f"from {WAN_CONFIG['input_size']}x{WAN_CONFIG['input_size']} input. "
+        f"Pass --latent-height and --latent-width explicitly."
     )
 
 
@@ -117,17 +105,16 @@ def write_video(frames: list[np.ndarray], path: str, fps: float):
 
 
 def make_side_by_side(frames_a: list[np.ndarray], frames_b: list[np.ndarray]) -> list[np.ndarray]:
-    """Horizontally concatenate two frame lists, resizing to match heights."""
+    """Horizontally concatenate two frame lists, resizing both to the same (h, w)."""
+    from PIL import Image
+    # Use the first frame of frames_a as the reference size
+    ref_h, ref_w = frames_a[0].shape[0], frames_a[0].shape[1]
     out = []
     for fa, fb in zip(frames_a, frames_b):
-        h = min(fa.shape[0], fb.shape[0])
-        # Resize if heights differ
-        if fa.shape[0] != h:
-            from PIL import Image
-            fa = np.array(Image.fromarray(fa).resize((int(fa.shape[1] * h / fa.shape[0]), h)))
-        if fb.shape[0] != h:
-            from PIL import Image
-            fb = np.array(Image.fromarray(fb).resize((int(fb.shape[1] * h / fb.shape[0]), h)))
+        if fa.shape[0] != ref_h or fa.shape[1] != ref_w:
+            fa = np.array(Image.fromarray(fa).resize((ref_w, ref_h), Image.LANCZOS))
+        if fb.shape[0] != ref_h or fb.shape[1] != ref_w:
+            fb = np.array(Image.fromarray(fb).resize((ref_w, ref_h), Image.LANCZOS))
         out.append(np.concatenate([fa, fb], axis=1))
     return out
 
@@ -138,7 +125,7 @@ def main():
     parser.add_argument("--output-dir", default="outputs/wan_decoded", help="Output directory")
     parser.add_argument("--model", default="ByteDance/Video-As-Prompt-Wan2.1-14B", help="WAN VAE model")
     parser.add_argument("--subfolder", default="vae")
-    parser.add_argument("--dtype", default="fp32", choices=["bf16", "fp16", "fp32"])
+    parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--front-key", default="wan_front_embd")
     parser.add_argument("--wrist-key", default="wan_wrist_embd")
@@ -181,8 +168,8 @@ def main():
             latent_dim = front_latents.shape[2]
             T = front_latents.shape[0]
 
-            latent_h, latent_w = _infer_latent_hw_from_camera(
-                grp, num_patches, args.latent_height, args.latent_width,
+            latent_h, latent_w = _infer_latent_hw(
+                num_patches, args.latent_height, args.latent_width,
             )
 
             print(f"  {traj_key}: {T} frames, latent ({latent_h}x{latent_w})x{latent_dim}, "

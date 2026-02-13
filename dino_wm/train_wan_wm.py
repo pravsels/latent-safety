@@ -38,7 +38,7 @@ if _REPO_ROOT not in sys.path:
 
 from dino_wm.dino_models import VideoTransformer, normalize_acs, normalize_states
 from dino_wm.checkpoint_utils import filter_state_dict_by_shape
-from dino_wm.config import DECODER_CONFIG, MODEL_CONFIG
+from dino_wm.config import DECODER_CONFIG, MODEL_CONFIG, WAN_CONFIG
 from dino_wm.train_wm_common import (
     build_wm_optimizer,
     build_split_datasets,
@@ -115,13 +115,14 @@ class WanDecoderAdapter:
                 )
             return self.latent_h, self.latent_w
 
-        side = int(np.sqrt(num_patches))
-        if side * side != num_patches:
-            raise ValueError(
-                "Cannot infer WAN latent H/W from non-square num_patches. "
-                "Set --wan-latent-height and --wan-latent-width explicitly."
-            )
-        return side, side
+        side = WAN_CONFIG['latent_side']
+        if side * side == num_patches:
+            return side, side
+
+        raise ValueError(
+            f"num_patches={num_patches} doesn't match expected {side}x{side}={side*side} "
+            f"from WAN_CONFIG. Set --wan-latent-height and --wan-latent-width explicitly."
+        )
 
     @torch.no_grad()
     def decode_tokens(self, tokens: torch.Tensor) -> torch.Tensor:

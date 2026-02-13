@@ -82,6 +82,16 @@ DECODER_CONFIG = {
     'codebook_size': 2048,             # VQ-VAE codebook size (number of embeddings in the discrete vocabulary)
 }
 
+# WAN VAE configuration
+_WAN_INPUT_SIZE = 304               # Must be multiple of 8 (spatial_downsample)
+WAN_CONFIG = {
+    'input_size': _WAN_INPUT_SIZE,
+    'spatial_downsample': 8,                            # VAE spatial compression factor
+    'latent_dim': 16,                                   # Latent channels per spatial position
+    'latent_side': _WAN_INPUT_SIZE // 8,                # = 38
+    'num_patches': (_WAN_INPUT_SIZE // 8) ** 2,         # = 1444 (38x38 grid)
+}
+
 # Training Defaults
 TRAIN_CONFIG = {
     'sequence_length': 4,      # Total sequence length (context + prediction)

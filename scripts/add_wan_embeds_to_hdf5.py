@@ -8,6 +8,7 @@ that can be consumed by the WAN backbone world-model flow.
 
 import argparse
 import os
+import sys
 from typing import Iterable
 
 import h5py
@@ -15,6 +16,12 @@ import numpy as np
 import torch
 from einops import rearrange
 from tqdm import tqdm
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from dino_wm.config import WAN_CONFIG
 
 
 def _copy_attrs(src, dst) -> None:
@@ -69,26 +76,15 @@ def _load_wan_vae(model_id_or_path: str, subfolder: str, device: str, dtype: str
     return vae, dev, model_dtype
 
 
-def _center_crop_to_multiple(frames: np.ndarray, multiple: int) -> np.ndarray:
-    """
-    frames: (B, H, W, C) uint8
-    """
-    if multiple <= 1:
-        return frames
-    h, w = int(frames.shape[1]), int(frames.shape[2])
-    nh = (h // multiple) * multiple
-    nw = (w // multiple) * multiple
-    top = (h - nh) // 2
-    left = (w - nw) // 2
-    return frames[:, top:top + nh, left:left + nw, :]
-
-
-def _frames_to_wan_input(frames: np.ndarray, device: torch.device, model_dtype: torch.dtype) -> torch.Tensor:
+def _frames_to_wan_input(frames: np.ndarray, device: torch.device, model_dtype: torch.dtype,
+                         input_size: int = WAN_CONFIG['input_size']) -> torch.Tensor:
     """
     frames: (B, H, W, C) uint8 -> (B, C, T=1, H, W) float in [-1, 1]
+    Resizes to (input_size, input_size) so latent grid is fixed regardless of camera resolution.
     """
     x = torch.from_numpy(frames).to(device=device, dtype=torch.float32)
     x = x.permute(0, 3, 1, 2).div(127.5).sub(1.0)  # (B, C, H, W)
+    x = torch.nn.functional.interpolate(x, size=(input_size, input_size), mode="bilinear", align_corners=False)
     x = x.unsqueeze(2).to(dtype=model_dtype)        # (B, C, 1, H, W)
     return x
 
@@ -118,15 +114,15 @@ def _compute_wan_embeddings(
     batch_size: int,
     device: torch.device,
     model_dtype: torch.dtype,
-    crop_multiple: int,
+    input_size: int = 224,
 ):
     total = cam0.shape[0]
     for i in range(0, total, batch_size):
-        w_np = _center_crop_to_multiple(cam0[i:i + batch_size], crop_multiple)
-        f_np = _center_crop_to_multiple(cam1[i:i + batch_size], crop_multiple)
+        w_np = cam0[i:i + batch_size]
+        f_np = cam1[i:i + batch_size]
 
-        w = _frames_to_wan_input(w_np, device, model_dtype)
-        f = _frames_to_wan_input(f_np, device, model_dtype)
+        w = _frames_to_wan_input(w_np, device, model_dtype, input_size=input_size)
+        f = _frames_to_wan_input(f_np, device, model_dtype, input_size=input_size)
 
         with torch.no_grad():
             z_w = vae.encode(w).latent_dist.mode()
@@ -145,8 +141,9 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--model", type=str, required=True, help="WAN VAE model id/path")
     parser.add_argument("--subfolder", type=str, default="vae")
-    parser.add_argument("--dtype", type=str, default="fp32", choices=["bf16", "fp16", "fp32"])
-    parser.add_argument("--crop-multiple", type=int, default=8)
+    parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
+    parser.add_argument("--input-size", type=int, default=WAN_CONFIG['input_size'],
+                        help="Resize images to this square size before encoding.")
     parser.add_argument("--front-key", type=str, default="wan_front_embd")
     parser.add_argument("--wrist-key", type=str, default="wan_wrist_embd")
     parser.add_argument("--resume", action="store_true", help="Skip trajectories already present in output.")
@@ -207,7 +204,7 @@ def main():
                 batch_size=args.batch_size,
                 device=device,
                 model_dtype=model_dtype,
-                crop_multiple=args.crop_multiple,
+                input_size=args.input_size,
             ):
                 if front_ds is None or wrist_ds is None:
                     num_patches = int(f_emb.shape[1])
