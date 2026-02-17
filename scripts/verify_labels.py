@@ -4,6 +4,7 @@ Verify failure labels in an HDF5 dataset.
 
 Usage:
     python scripts/verify_labels.py fail_bin_pick_capsules_dino3.h5
+    python scripts/verify_labels.py data.h5 --mark-all-safe
 """
 
 import argparse
@@ -39,7 +40,7 @@ def verify_labels(hdf5_path: str):
         all_safe = []
 
         for traj_name in traj_keys:
-            traj_group = f[traj_name]
+            traj_group = f[traj_name]  # trajectory group (e.g. f["trajectory_0"])
             n_frames_this_ep = traj_group["camera_0"].shape[0] if "camera_0" in traj_group else 0
 
             if "labels" not in traj_group:
@@ -82,24 +83,25 @@ def verify_labels(hdf5_path: str):
         print(f"  Unsafe frames:       {total_unsafe} ({total_unsafe / max(total_frames, 1) * 100:.1f}%)")
         print(f"  Weak unsafe frames:  {total_weak} ({total_weak / max(total_frames, 1) * 100:.1f}%)")
 
+        labeled_count = len(traj_keys) - len(missing_labels)
+        labeled_with_failures = labeled_count - len(all_safe)
+
         if missing_labels:
-            print(f"\n  ❌ Missing labels ({len(missing_labels)}):")
+            print(f"\n  ❌ Labeled: {labeled_count}/{len(traj_keys)} — MISSING {len(missing_labels)}:")
             for traj_name in missing_labels:
                 print(f"     {traj_name}")
+        else:
+            print(f"\n  ✅ All {len(traj_keys)} trajectories labeled")
 
-        if all_safe:
-            print(f"\n  ℹ️  Entirely safe / unlabeled ({len(all_safe)}):")
-            for traj_name in all_safe:
-                print(f"     {traj_name}")
-
-        labeled_with_failures = len(traj_keys) - len(missing_labels) - len(all_safe)
-        print(f"\n  Labeled with failures: {labeled_with_failures}/{len(traj_keys)}")
+        print(f"     With failures: {labeled_with_failures}")
+        print(f"     Entirely safe: {len(all_safe)}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Verify failure labels in HDF5 dataset")
+    parser = argparse.ArgumentParser(description="Verify or mark failure labels in HDF5 dataset")
     parser.add_argument("hdf5_file", help="Path to HDF5 file")
     args = parser.parse_args()
+
     verify_labels(args.hdf5_file)
 
 
