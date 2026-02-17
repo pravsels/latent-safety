@@ -3,7 +3,18 @@
 Convert Hugging Face LeRobot datasets into a consolidated HDF5 file for DINO-WM.
 
 QUICKSTART:
-    # Fresh start
+    # Single dataset with DINO embeddings (default)
+    python scripts/lerobot_to_hdf5.py \
+        --dataset villekuosmanen/fail_bil_pick_capsules_drop_on_table \
+        --output-hdf5 fail_bin_pick_capsules_dino.h5 --batch-size 128
+
+    # Single dataset with WAN VAE embeddings
+    python scripts/lerobot_to_hdf5.py \
+        --dataset villekuosmanen/fail_bil_pick_capsules_drop_on_table \
+        --output-hdf5 fail_bin_pick_capsules_wan.h5 \
+        --embed-type wan
+
+    # From JSON file
     python scripts/lerobot_to_hdf5.py \
         --datasets-list arx5_datasets.json \
         --output-hdf5 arx5_datasets.h5 \
@@ -12,15 +23,22 @@ QUICKSTART:
 
 import argparse
 import json
+import os
 import shutil
 import signal
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple, Set
 
+# Ensure this repo's dino_wm takes precedence over any installed version
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import h5py
 import numpy as np
 import torch
+from einops import rearrange
 from tqdm import tqdm
 import packaging.version
 from datasets import load_dataset
@@ -39,6 +57,7 @@ try:
     from robocandywrapper import make_dataset_without_config
 except ImportError:
     make_dataset_without_config = None
+from dino_wm.config import WAN_CONFIG
 from dino_wm.data_utils import write_actions_delta
 
 # Global flag for graceful shutdown
@@ -52,6 +71,72 @@ def signal_handler(signum, frame):
     SHUTDOWN_REQUESTED = True
     # Restore default handler so second Ctrl+C will force quit
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
+# --- WAN Embedding Helpers ---
+
+def _load_wan_vae(model_id_or_path: str, subfolder: str, device: str, dtype: str):
+    from diffusers import AutoencoderKLWan
+    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+    dev = torch.device(device if device != "cuda" or torch.cuda.is_available() else "cpu")
+    model_dtype = dtype_map[dtype] if dev.type == "cuda" else torch.float32
+    vae = AutoencoderKLWan.from_pretrained(
+        model_id_or_path,
+        subfolder=subfolder,
+        torch_dtype=model_dtype,
+    ).to(dev).eval()
+    return vae, dev, model_dtype
+
+
+def _frames_to_wan_input(frames: np.ndarray, device: torch.device, model_dtype: torch.dtype,
+                         input_size: int = WAN_CONFIG["input_size"]) -> torch.Tensor:
+    """frames: (B, H, W, C) uint8 -> (B, C, 1, H', W') float in [-1, 1]"""
+    x = torch.from_numpy(frames).to(device=device, dtype=torch.float32)
+    x = x.permute(0, 3, 1, 2).div(127.5).sub(1.0)
+    x = torch.nn.functional.interpolate(x, size=(input_size, input_size), mode="bilinear", align_corners=False)
+    x = x.unsqueeze(2).to(dtype=model_dtype)  # (B, C, 1, H, W)
+    return x
+
+
+def _flatten_wan_latents(z: torch.Tensor) -> torch.Tensor:
+    """(B, C, T, H, W) or (B, C, H, W) -> (B, H*W, C)"""
+    if z.ndim == 5:
+        z2d = z[:, :, 0, :, :]
+    elif z.ndim == 4:
+        z2d = z
+    else:
+        raise ValueError(f"Unexpected latent shape {tuple(z.shape)}")
+    return rearrange(z2d, "b c h w -> b (h w) c")
+
+
+def _compute_embeddings_batch(embed_config: dict, w_uint8: np.ndarray, f_uint8: np.ndarray,
+                              device: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute embeddings for a batch of HWC uint8 images. Returns (w_emb, f_emb) as numpy float32."""
+    if embed_config["embed_type"] == "dino":
+        # HWC uint8 -> CHW float [0, 1]
+        w_mini = torch.from_numpy(w_uint8).to(device, dtype=torch.float32).permute(0, 3, 1, 2).div(255.0)
+        f_mini = torch.from_numpy(f_uint8).to(device, dtype=torch.float32).permute(0, 3, 1, 2).div(255.0)
+        w_prep = preprocess_images_for_dino(w_mini, is_front_camera=False)
+        f_prep = preprocess_images_for_dino(f_mini, is_front_camera=True)
+        with torch.no_grad():
+            w_emb = embed_config["model"].forward_features(w_prep)["x_norm_patchtokens"].cpu().numpy()
+            f_emb = embed_config["model"].forward_features(f_prep)["x_norm_patchtokens"].cpu().numpy()
+        return w_emb, f_emb
+    elif embed_config["embed_type"] == "wan":
+        dev = embed_config["device"]
+        model_dtype = embed_config["model_dtype"]
+        input_size = embed_config.get("input_size", WAN_CONFIG["input_size"])
+        w = _frames_to_wan_input(w_uint8, dev, model_dtype, input_size)
+        f = _frames_to_wan_input(f_uint8, dev, model_dtype, input_size)
+        with torch.no_grad():
+            z_w = embed_config["model"].encode(w).latent_dist.mode()
+            z_f = embed_config["model"].encode(f).latent_dist.mode()
+            w_emb = _flatten_wan_latents(z_w).float().cpu().numpy()
+            f_emb = _flatten_wan_latents(z_f).float().cpu().numpy()
+        return w_emb, f_emb
+    else:
+        raise ValueError(f"Unknown embed_type: {embed_config['embed_type']}")
+
 
 # --- Worker Process ---
 
@@ -112,6 +197,12 @@ def _select_batch_key(batch: dict, candidates: List[str], meta_features: Optiona
 
 
 def _to_tensor_batch(data):
+    if isinstance(data, torch.Tensor):
+        if data.is_sparse:
+            data = data.to_dense()
+        return data
+    if isinstance(data, np.ndarray):
+        return data
     if isinstance(data, list):
         cleaned = []
         for item in data:
@@ -119,12 +210,13 @@ def _to_tensor_batch(data):
                 if item.is_sparse:
                     item = item.to_dense()
                 cleaned.append(item)
+            elif isinstance(item, np.ndarray):
+                cleaned.append(torch.from_numpy(item))
             else:
                 cleaned.append(torch.tensor(item))
         return torch.stack(cleaned)
-    if isinstance(data, np.ndarray):
-        return data
-    return data
+    # Fallback: try converting directly
+    return np.asarray(data)
 
 
 def data_generator(
@@ -200,7 +292,7 @@ def process_dataset_object(
     dataset,
     dataset_id: str,
     hdf_file: h5py.File,
-    dino_model: torch.nn.Module,
+    embed_config: dict,
     device: str,
     batch_size: int,
     max_episodes: Optional[int],
@@ -296,12 +388,13 @@ def process_dataset_object(
                 chunk_end = min(start_idx + i + batch_size, end_idx)
                 
                 # Load Chunk (avoid auto torch formatting that breaks on string fields)
-                batch = dataset_ref.hf_dataset.with_format("numpy")[chunk_start:chunk_end]
+                # Use None format to avoid NumPy 2.x copy=False issue in datasets lib
+                batch = dataset_ref.hf_dataset.with_format(None)[chunk_start:chunk_end]
                 
                 # Get Timestamps for video query
                 ts_raw = batch["timestamp"]
                 batch_timestamps = [
-                    np.float64(t.item()) if isinstance(t, torch.Tensor) else np.float64(t)
+                    np.float64(t.item() if hasattr(t, 'item') else t)
                     for t in ts_raw
                 ]
                 
@@ -340,15 +433,10 @@ def process_dataset_object(
                 w_uint8 = to_hwc_uint8(w_mini)
                 f_uint8 = to_hwc_uint8(f_mini)
                 
-                # Inference
-                with torch.no_grad():
-                    w_prep = preprocess_images_for_dino(w_mini, is_front_camera=False)
-                    f_prep = preprocess_images_for_dino(f_mini, is_front_camera=True)
-                    
-                    w_emb = dino_model.forward_features(w_prep)["x_norm_patchtokens"].cpu().numpy()
-                    f_emb = dino_model.forward_features(f_prep)["x_norm_patchtokens"].cpu().numpy()
+                # Compute embeddings (DINO or WAN)
+                w_emb, f_emb = _compute_embeddings_batch(embed_config, w_uint8, f_uint8, device)
                 
-                del w_mini, f_mini, w_prep, f_prep, video_frames
+                del w_mini, f_mini, video_frames
                 
                 # --- Handle Non-Video Data (Actions/States) ---
                 action_key = _select_batch_key(
@@ -366,7 +454,7 @@ def process_dataset_object(
                 if action_key is None:
                     raise KeyError("Missing action key in batch")
                 act = _to_tensor_batch(batch[action_key])
-                act_np = act if isinstance(act, np.ndarray) else act.numpy()
+                act_np = act if isinstance(act, np.ndarray) else np.asarray(act)
             
                 # States
                 st_np = None
@@ -383,17 +471,19 @@ def process_dataset_object(
                 )
                 if state_key is not None:
                     st = _to_tensor_batch(batch[state_key])
-                    st_np = st if isinstance(st, np.ndarray) else st.numpy()
+                    st_np = st if isinstance(st, np.ndarray) else np.asarray(st)
                 if st_np is None:
                     raise ValueError("Missing observation.state; actions_delta is required.")
 
                 # --- Write to HDF5 (Incremental) ---
+                wrist_key = embed_config["wrist_key"]
+                front_key = embed_config["front_key"]
                 if not datasets_initialized:
                     grp.create_dataset("camera_0", data=w_uint8, maxshape=(None, *w_uint8.shape[1:]), compression="gzip", chunks=True)
                     grp.create_dataset("camera_1", data=f_uint8, maxshape=(None, *f_uint8.shape[1:]), compression="gzip", chunks=True)
                     grp.create_dataset("actions", data=act_np, maxshape=(None, *act_np.shape[1:]), chunks=True)
-                    grp.create_dataset("cam_rs_embd", data=w_emb, maxshape=(None, *w_emb.shape[1:]), chunks=True)
-                    grp.create_dataset("cam_zed_embd", data=f_emb, maxshape=(None, *f_emb.shape[1:]), chunks=True)
+                    grp.create_dataset(wrist_key, data=w_emb, maxshape=(None, *w_emb.shape[1:]), chunks=True)
+                    grp.create_dataset(front_key, data=f_emb, maxshape=(None, *f_emb.shape[1:]), chunks=True)
                     
                     if st_np is not None:
                         grp.create_dataset("states", data=st_np, maxshape=(None, *st_np.shape[1:]), chunks=True)
@@ -403,7 +493,7 @@ def process_dataset_object(
                     # Resize and Append
                     for name, arr in [
                         ("camera_0", w_uint8), ("camera_1", f_uint8), 
-                        ("actions", act_np), ("cam_rs_embd", w_emb), ("cam_zed_embd", f_emb)
+                        ("actions", act_np), (wrist_key, w_emb), (front_key, f_emb)
                     ]:
                         grp[name].resize(grp[name].shape[0] + arr.shape[0], axis=0)
                         grp[name][-arr.shape[0]:] = arr
@@ -460,7 +550,7 @@ def process_dataset_object(
 def process_wrapped_dataset(
     wrapped_dataset,
     hdf_file: h5py.File,
-    dino_model: torch.nn.Module,
+    embed_config: dict,
     device: str,
     batch_size: int,
     max_episodes: Optional[int],
@@ -486,7 +576,7 @@ def process_wrapped_dataset(
             dataset=dataset,
             dataset_id=repo_id,
             hdf_file=hdf_file,
-            dino_model=dino_model,
+            embed_config=embed_config,
             device=device,
             batch_size=batch_size,
             max_episodes=max_episodes,
@@ -511,7 +601,10 @@ def get_camera_keys(repo_id: str) -> set[str]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--datasets-list", type=str, required=True)
+    parser.add_argument("--datasets-list", type=str, default=None,
+                       help="Path to JSON file with list of dataset IDs")
+    parser.add_argument("--dataset", type=str, nargs="+", default=None,
+                       help="Dataset ID(s) directly, e.g. villekuosmanen/fail_bil_pick_capsules_drop_on_table")
     parser.add_argument("--output-hdf5", type=str, required=True)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--max-datasets", type=int, default=None)
@@ -519,19 +612,34 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--resume", action="store_true", 
                        help="Resume from existing file (append mode)")
+    parser.add_argument("--embed-type", type=str, choices=["dino", "wan"], default="dino",
+                       help="Embedding backbone: 'dino' (default) or 'wan'")
     parser.add_argument("--dino-version", type=str, choices=['v2', 'v3'], default='v3',
-                       help="DINO version to use for embeddings (default: v3)")
+                       help="DINO version to use (only with --embed-type dino, default: v3)")
+    parser.add_argument("--wan-model", type=str, default="ByteDance/Video-As-Prompt-Wan2.1-14B",
+                       help="WAN VAE model id or path (only with --embed-type wan)")
+    parser.add_argument("--wan-subfolder", type=str, default="vae",
+                       help="Subfolder for WAN VAE weights (default: vae)")
+    parser.add_argument("--wan-dtype", type=str, choices=["bf16", "fp16", "fp32"], default="bf16",
+                       help="WAN VAE precision (default: bf16)")
+    parser.add_argument("--wan-input-size", type=int, default=WAN_CONFIG["input_size"],
+                       help=f"WAN input image size (default: {WAN_CONFIG['input_size']})")
     args = parser.parse_args()
 
-    print(f"🔧 Using DINO version: {args.dino_version}")
+    print(f"🔧 Using embedding type: {args.embed_type}")
 
     # Setup signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     # Load Dataset List
-    with open(args.datasets_list, "r") as f:
-        dataset_ids = json.load(f)
+    if args.dataset is not None:
+        dataset_ids = args.dataset
+    elif args.datasets_list is not None:
+        with open(args.datasets_list, "r") as f:
+            dataset_ids = json.load(f)
+    else:
+        parser.error("Either --dataset or --datasets-list is required")
 
     if args.max_datasets:
         dataset_ids = dataset_ids[:args.max_datasets]
@@ -539,9 +647,28 @@ def main():
     # Setup Device
     device = args.device if torch.cuda.is_available() else "cpu"
 
-    # Load Model
-    print("📦 Loading DINO model...")
-    dino_model = get_dino_model(device, args.dino_version)
+    # Load embedding model
+    if args.embed_type == "dino":
+        print(f"📦 Loading DINO {args.dino_version} model...")
+        model = get_dino_model(device, args.dino_version)
+        embed_config = {
+            "embed_type": "dino",
+            "model": model,
+            "wrist_key": "cam_rs_embd",
+            "front_key": "cam_zed_embd",
+        }
+    elif args.embed_type == "wan":
+        print(f"📦 Loading WAN VAE from {args.wan_model}...")
+        vae, dev, model_dtype = _load_wan_vae(args.wan_model, args.wan_subfolder, device, args.wan_dtype)
+        embed_config = {
+            "embed_type": "wan",
+            "model": vae,
+            "device": dev,
+            "model_dtype": model_dtype,
+            "input_size": args.wan_input_size,
+            "wrist_key": "wan_wrist_embd",
+            "front_key": "wan_front_embd",
+        }
 
     # Prepare Output
     output_path = Path(args.output_hdf5)
@@ -586,7 +713,7 @@ def main():
                     dataset=LeRobotDataset(ds_id, video_backend="pyav"),
                     dataset_id=ds_id,
                     hdf_file=hf_out,
-                    dino_model=dino_model,
+                    embed_config=embed_config,
                     device=device,
                     batch_size=args.batch_size,
                     max_episodes=args.max_episodes_per_dataset,
@@ -637,7 +764,7 @@ def main():
                         traj_counter = process_wrapped_dataset(
                             wrapped_dataset=wrapped_dataset,
                             hdf_file=hf_out,
-                            dino_model=dino_model,
+                            embed_config=embed_config,
                             device=device,
                             batch_size=args.batch_size,
                             max_episodes=args.max_episodes_per_dataset,
