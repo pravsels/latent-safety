@@ -38,37 +38,37 @@ def verify_labels(hdf5_path: str):
         empty_labels = []
         all_safe = []
 
-        for k in traj_keys:
-            g = f[k]
-            n_frames = g["camera_0"].shape[0] if "camera_0" in g else 0
+        for traj_name in traj_keys:
+            traj_group = f[traj_name]
+            n_frames_this_ep = traj_group["camera_0"].shape[0] if "camera_0" in traj_group else 0
 
-            if "labels" not in g:
-                missing_labels.append(k)
+            if "labels" not in traj_group:
+                missing_labels.append(traj_name)
                 continue
 
-            labels = g["labels"][:]
-            if len(labels) != n_frames:
-                print(f"  ⚠️  {k}: label length ({len(labels)}) != frames ({n_frames})")
+            labels = traj_group["labels"][:]
+            if len(labels) != n_frames_this_ep:
+                print(f"  ⚠️  {traj_name}: label length ({len(labels)}) != frames ({n_frames_this_ep})")
 
-            n_safe = int(np.sum(labels == 0))
-            n_unsafe = int(np.sum(labels == 1))
-            n_weak = int(np.sum(labels == 2))
+            n_safe_this_ep = int(np.sum(labels == 0))
+            n_unsafe_this_ep = int(np.sum(labels == 1))
+            n_weak_this_ep = int(np.sum(labels == 2))
 
             total_frames += len(labels)
-            total_safe += n_safe
-            total_unsafe += n_unsafe
-            total_weak += n_weak
+            total_safe += n_safe_this_ep
+            total_unsafe += n_unsafe_this_ep
+            total_weak += n_weak_this_ep
 
-            if n_unsafe == 0 and n_weak == 0:
-                all_safe.append(k)
+            if n_unsafe_this_ep == 0 and n_weak_this_ep == 0:
+                all_safe.append(traj_name)
                 continue
 
-            if n_unsafe == 0 and n_weak == 0 and n_safe == 0:
-                empty_labels.append(k)
+            if n_unsafe_this_ep == 0 and n_weak_this_ep == 0 and n_safe_this_ep == 0:
+                empty_labels.append(traj_name)
 
-            pct_unsafe = (n_unsafe + n_weak) / len(labels) * 100
-            print(f"  {k}: {len(labels)} frames | "
-                  f"safe={n_safe} unsafe={n_unsafe} weak={n_weak} "
+            pct_unsafe = (n_unsafe_this_ep + n_weak_this_ep) / len(labels) * 100
+            print(f"  {traj_name}: {len(labels)} frames | "
+                  f"safe={n_safe_this_ep} unsafe={n_unsafe_this_ep} weak={n_weak_this_ep} "
                   f"({pct_unsafe:.0f}% failure)")
 
         # Summary
@@ -84,13 +84,13 @@ def verify_labels(hdf5_path: str):
 
         if missing_labels:
             print(f"\n  ❌ Missing labels ({len(missing_labels)}):")
-            for k in missing_labels:
-                print(f"     {k}")
+            for traj_name in missing_labels:
+                print(f"     {traj_name}")
 
         if all_safe:
             print(f"\n  ℹ️  Entirely safe / unlabeled ({len(all_safe)}):")
-            for k in all_safe:
-                print(f"     {k}")
+            for traj_name in all_safe:
+                print(f"     {traj_name}")
 
         labeled_with_failures = len(traj_keys) - len(missing_labels) - len(all_safe)
         print(f"\n  Labeled with failures: {labeled_with_failures}/{len(traj_keys)}")
