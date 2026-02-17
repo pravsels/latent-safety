@@ -505,10 +505,11 @@ def run_train_eval_loop(
             torch.save(_make_ckpt_dict(i, current_best_eval), latest_ckpt_path)
 
         if i % args.eval_interval == 0:
-            # Keep all DDP ranks in lock-step while rank0 performs eval/checkpoint I/O.
+            # Barrier so all ranks pause training while rank 0 runs eval forward passes.
             if is_distributed:
                 torch.distributed.barrier()
 
+            eval_log_dict = None
             if is_rank0:
                 transition.eval()
                 avg_metrics = {"eval_loss": 0.0, "front_loss": 0.0, "wrist_loss": 0.0, "state_loss": 0.0}
@@ -569,21 +570,17 @@ def run_train_eval_loop(
                 print(
                     f"\rIter {i}, Eval Loss: {avg_metrics['eval_loss']:.4f}, front: {avg_metrics['front_loss']:.4f}, wrist: {avg_metrics['wrist_loss']:.4f}, state: {avg_metrics['state_loss']:.4f}"
                 )
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                torch.save(_make_ckpt_dict(i, current_best_eval), os.path.join(checkpoint_dir, f"wm_iter{i}.pth"))
-                if avg_metrics["eval_loss"] < current_best_eval:
-                    current_best_eval = avg_metrics["eval_loss"]
-                    torch.save(_make_ckpt_dict(i, current_best_eval), os.path.join(checkpoint_dir, "best_wm.pth"))
-
                 transition.train()
-                log_dict = {
+
+                # Prepare log dict and checkpoint data for deferred I/O after barrier
+                eval_log_dict = {
                     "eval_loss": avg_metrics["eval_loss"],
                     "front_loss": avg_metrics["front_loss"],
                     "wrist_loss": avg_metrics["wrist_loss"],
                     "state_loss": avg_metrics["state_loss"],
                 }
                 if sample_images is not None:
-                    log_dict.update(
+                    eval_log_dict.update(
                         {
                             "pred_front": wandb.Image(sample_images["pred_front"]),
                             "pred_wrist": wandb.Image(sample_images["pred_wrist"]),
@@ -591,9 +588,21 @@ def run_train_eval_loop(
                             "wrist": wandb.Image(sample_images["wrist"]),
                         }
                     )
-                wandb.log(log_dict)
 
+            # Release all ranks — checkpoint saves and wandb logging happen after
+            # so ranks 1,2 can resume training without waiting on disk I/O.
             if is_distributed:
                 torch.distributed.barrier()
+
+            # Deferred I/O: checkpoint saves and wandb logging (rank 0 only).
+            # Other ranks proceed to next training iter; the worst case is they
+            # briefly wait at the next backward() all-reduce for rank 0 to finish.
+            if is_rank0 and eval_log_dict is not None:
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                torch.save(_make_ckpt_dict(i, current_best_eval), os.path.join(checkpoint_dir, f"wm_iter{i}.pth"))
+                if eval_log_dict["eval_loss"] < current_best_eval:
+                    current_best_eval = eval_log_dict["eval_loss"]
+                    torch.save(_make_ckpt_dict(i, current_best_eval), os.path.join(checkpoint_dir, "best_wm.pth"))
+                wandb.log(eval_log_dict)
 
     return current_best_eval
