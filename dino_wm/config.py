@@ -83,13 +83,13 @@ DECODER_CONFIG = {
 }
 
 # WAN VAE configuration
-_WAN_INPUT_SIZE = 304               # Must be multiple of 8 (spatial_downsample)
+_WAN_INPUT_SIZE = 224               # Must be multiple of 8 (spatial_downsample)
 WAN_CONFIG = {
     'input_size': _WAN_INPUT_SIZE,
     'spatial_downsample': 8,                            # VAE spatial compression factor
     'latent_dim': 16,                                   # Latent channels per spatial position
-    'latent_side': _WAN_INPUT_SIZE // 8,                # = 38
-    'num_patches': (_WAN_INPUT_SIZE // 8) ** 2,         # = 1444 (38x38 grid)
+    'latent_side': _WAN_INPUT_SIZE // 8,                # = 28
+    'num_patches': (_WAN_INPUT_SIZE // 8) ** 2,         # = 784 (28x28 grid)
 }
 
 # Training Defaults

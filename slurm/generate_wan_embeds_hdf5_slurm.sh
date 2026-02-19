@@ -27,7 +27,7 @@ HF_TOKEN_FILE="${home_dir}/.hf_token"
 
 # Input/Output config
 INPUT_HDF5="${data_dir}/arx5_datasets_6Feb_26.h5"
-OUTPUT_HDF5="${data_dir}/arx5_datasets_6Feb_26_wan.h5"
+OUTPUT_HDF5="${data_dir}/arx5_datasets_6Feb_26_wan224.h5"
 WAN_MODEL="ByteDance/Video-As-Prompt-Wan2.1-14B"
 BATCH_SIZE=128
 

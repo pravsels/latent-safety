@@ -28,7 +28,7 @@ WANDB_CACHE_DIR="${data_dir}/wandb_cache"
 WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 
 # Training config
-HDF5_FILE="${data_dir}/arx5_datasets_6Feb_26_wan.h5"
+HDF5_FILE="${data_dir}/arx5_datasets_6Feb_26_wan224.h5"
 STATS_FILE="${data_dir}/arx5_datasets_6Feb_26_stats.json"
 CONFIG_FILE="configs/wan_wm_config.yaml"
 WAN_VAE_MODEL="ByteDance/Video-As-Prompt-Wan2.1-14B"

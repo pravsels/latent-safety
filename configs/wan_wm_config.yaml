@@ -3,7 +3,7 @@
 #   python dino_wm/train_wan_wm.py --config configs/wan_wm_config.yaml
 
 # Data
-hdf5_file: arx5_datasets_6Feb_26_wan.h5
+hdf5_file: arx5_datasets_6Feb_26_wan224.h5
 dataset_stats: arx5_datasets_6Feb_26_stats.json
 test_frac: 0.1
 action_key: actions_delta
