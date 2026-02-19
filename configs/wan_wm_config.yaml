@@ -11,7 +11,7 @@ front_latent_key: wan_front_embd
 wrist_latent_key: wan_wrist_embd
 
 # Training
-batch_size: 32
+batch_size: 16
 train_iters: 100000
 device: "cuda:0"
 seed: 42

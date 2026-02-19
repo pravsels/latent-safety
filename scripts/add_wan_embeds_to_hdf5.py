@@ -114,7 +114,7 @@ def _compute_wan_embeddings(
     batch_size: int,
     device: torch.device,
     model_dtype: torch.dtype,
-    input_size: int = 224,
+    input_size: int = WAN_CONFIG['input_size'],
 ):
     total = cam0.shape[0]
     for i in range(0, total, batch_size):
@@ -148,6 +148,13 @@ def main():
     parser.add_argument("--wrist-key", type=str, default="wan_wrist_embd")
     parser.add_argument("--resume", action="store_true", help="Skip trajectories already present in output.")
     args = parser.parse_args()
+
+    expected_input_size = int(WAN_CONFIG["input_size"])
+    if int(args.input_size) != expected_input_size:
+        raise ValueError(
+            f"--input-size ({args.input_size}) must match WAN_CONFIG['input_size'] "
+            f"({expected_input_size}) to keep generated HDF5 latents consistent with training config."
+        )
 
     if not os.path.exists(args.input_hdf5):
         raise FileNotFoundError(f"Input HDF5 not found: {args.input_hdf5}")
