@@ -40,12 +40,15 @@ STATS_FILE="${data_dir}/arx5_datasets_6Feb_26_stats.json"
 case "${PROFILE}" in
     default)
         CONFIG_FILE="configs/dino_wm_config.yaml"
+        RESUME_FLAG="--auto-resume"
         ;;
     debug)
         CONFIG_FILE="configs/dino_wm_debug_eval_repro.yaml"
+        RESUME_FLAG="--no-auto-resume"
         ;;
     debug-heavy)
         CONFIG_FILE="configs/dino_wm_debug_eval_repro_heavy.yaml"
+        RESUME_FLAG="--no-auto-resume"
         ;;
     *)
         echo "Unknown profile: ${PROFILE}"
@@ -85,7 +88,7 @@ TRAIN_CMD="python dino_wm/train_dino_wm.py \
     --config ${CONFIG_FILE} \
     --hdf5-file ${HDF5_FILE} \
     --dataset-stats ${STATS_FILE} \
-    --auto-resume"
+    ${RESUME_FLAG}"
 
 INSTALL_TORCHMETRICS_CMD="python -m pip install --upgrade --no-deps --target ${PYTHON_EXT_DIR} torchmetrics lightning-utilities packaging"
 
@@ -93,6 +96,7 @@ echo "Running stats and training..."
 echo "Command: ${STATS_CMD} && ${TRAIN_CMD}"
 echo "Profile: ${PROFILE}"
 echo "Config: ${CONFIG_FILE}"
+echo "Resume mode: ${RESUME_FLAG}"
 echo ""
 
 # Resolve MASTER_ADDR on the host (scontrol is not available inside the container).
