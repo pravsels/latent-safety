@@ -12,7 +12,7 @@ action_key: actions_delta
 
 # Training (short run for debugging)
 batch_size: 32
-train_iters: 20
+train_iters: 3
 device: "cuda:0"
 seed: 42
 sequence_length: 4
@@ -23,7 +23,7 @@ eval_horizon: 16
 context_length: 3
 
 # Stress paths likely involved in timeout
-eval_interval: 1
+eval_interval: 2
 eval_samples: 1
 save_every: 1
 
