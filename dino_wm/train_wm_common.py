@@ -511,58 +511,62 @@ def run_train_eval_loop(
 
             eval_log_dict = None
             if is_rank0:
-                transition.eval()
+                # Run eval on the underlying module (not DDP wrapper) because
+                # non-zero ranks are parked at barrier during rank-0-only eval.
+                transition_module.eval()
                 avg_metrics = {"eval_loss": 0.0, "front_loss": 0.0, "wrist_loss": 0.0, "state_loss": 0.0}
                 num_samples = args.eval_samples
                 sample_images = None
                 print(f"\nRunning evaluation on {num_samples} samples...")
 
-                for _ in range(num_samples):
-                    eval_data = next(expert_loader_imagine)
-                    gt_front_embd_eval = eval_data["cam_zed_embd"].to(device)
-                    ctx_idx = torch.arange(H, device=device, dtype=torch.long) * pred_step
-                    t = int(ctx_idx[-1].item())
-                    future_len = sample_future_action_window(
-                        action_horizon=action_horizon,
-                        future_action_steps_train=future_action_steps_train,
-                    )
-                    target_idx = t + future_len + 1
-                    input_front_embd_eval = gt_front_embd_eval.index_select(1, ctx_idx)
-                    gt_wrist_embd_eval = eval_data["cam_rs_embd"].to(device)
-                    input_wrist_embd_eval = gt_wrist_embd_eval.index_select(1, ctx_idx)
-                    all_acs = eval_data["action"][[0]].to(device)
-                    all_acs = normalize_acs_fn(all_acs, action_min, action_max, q02=action_q02, q98=action_q98)
-                    acs = all_acs.index_select(1, ctx_idx)
-                    gt_states_eval = eval_data["state"][[0]].to(device)
-                    input_states_eval = normalize_states_fn(
-                        gt_states_eval, state_min, state_max, q02=state_q02, q98=state_q98
-                    ).index_select(1, ctx_idx)
-                    future_actions = all_acs[:, t + 1 : t + 1 + future_len]
-                    pred_front, pred_wrist, pred_state, _ = transition(
-                        input_front_embd_eval, input_wrist_embd_eval, input_states_eval, acs, future_actions
-                    )
-
-                    target_front = gt_front_embd_eval[[0], target_idx]
-                    target_wrist = gt_wrist_embd_eval[[0], target_idx]
-                    target_state = normalize_states_fn(
-                        gt_states_eval[[0], target_idx], state_min, state_max, q02=state_q02, q98=state_q98
-                    )
-                    l_front = nn.MSELoss()(pred_front[:, -1], target_front).item()
-                    l_wrist = nn.MSELoss()(pred_wrist[:, -1], target_wrist).item()
-                    l_state = nn.MSELoss()(pred_state[:, -1], target_state).item()
-                    avg_metrics["eval_loss"] += (l_front + l_wrist + l_state)
-                    avg_metrics["front_loss"] += l_front
-                    avg_metrics["wrist_loss"] += l_wrist
-                    avg_metrics["state_loss"] += l_state
-
-                    if sample_images is None and render_eval_images_fn is not None:
-                        sample_images = render_eval_images_fn(
-                            pred_front=pred_front,
-                            pred_wrist=pred_wrist,
-                            eval_data=eval_data,
-                            target_idx=target_idx,
-                            device=device,
+                # eval() changes layer behavior; no_grad() disables autograd graph building.
+                with torch.no_grad():
+                    for _ in range(num_samples):
+                        eval_data = next(expert_loader_imagine)
+                        gt_front_embd_eval = eval_data["cam_zed_embd"].to(device)
+                        ctx_idx = torch.arange(H, device=device, dtype=torch.long) * pred_step
+                        t = int(ctx_idx[-1].item())
+                        future_len = sample_future_action_window(
+                            action_horizon=action_horizon,
+                            future_action_steps_train=future_action_steps_train,
                         )
+                        target_idx = t + future_len + 1
+                        input_front_embd_eval = gt_front_embd_eval.index_select(1, ctx_idx)
+                        gt_wrist_embd_eval = eval_data["cam_rs_embd"].to(device)
+                        input_wrist_embd_eval = gt_wrist_embd_eval.index_select(1, ctx_idx)
+                        all_acs = eval_data["action"][[0]].to(device)
+                        all_acs = normalize_acs_fn(all_acs, action_min, action_max, q02=action_q02, q98=action_q98)
+                        acs = all_acs.index_select(1, ctx_idx)
+                        gt_states_eval = eval_data["state"][[0]].to(device)
+                        input_states_eval = normalize_states_fn(
+                            gt_states_eval, state_min, state_max, q02=state_q02, q98=state_q98
+                        ).index_select(1, ctx_idx)
+                        future_actions = all_acs[:, t + 1 : t + 1 + future_len]
+                        pred_front, pred_wrist, pred_state, _ = transition_module(
+                            input_front_embd_eval, input_wrist_embd_eval, input_states_eval, acs, future_actions
+                        )
+
+                        target_front = gt_front_embd_eval[[0], target_idx]
+                        target_wrist = gt_wrist_embd_eval[[0], target_idx]
+                        target_state = normalize_states_fn(
+                            gt_states_eval[[0], target_idx], state_min, state_max, q02=state_q02, q98=state_q98
+                        )
+                        l_front = nn.MSELoss()(pred_front[:, -1], target_front).item()
+                        l_wrist = nn.MSELoss()(pred_wrist[:, -1], target_wrist).item()
+                        l_state = nn.MSELoss()(pred_state[:, -1], target_state).item()
+                        avg_metrics["eval_loss"] += (l_front + l_wrist + l_state)
+                        avg_metrics["front_loss"] += l_front
+                        avg_metrics["wrist_loss"] += l_wrist
+                        avg_metrics["state_loss"] += l_state
+
+                        if sample_images is None and render_eval_images_fn is not None:
+                            sample_images = render_eval_images_fn(
+                                pred_front=pred_front,
+                                pred_wrist=pred_wrist,
+                                eval_data=eval_data,
+                                target_idx=target_idx,
+                                device=device,
+                            )
 
                 for k in avg_metrics:
                     avg_metrics[k] /= num_samples
@@ -570,7 +574,7 @@ def run_train_eval_loop(
                 print(
                     f"\rIter {i}, Eval Loss: {avg_metrics['eval_loss']:.4f}, front: {avg_metrics['front_loss']:.4f}, wrist: {avg_metrics['wrist_loss']:.4f}, state: {avg_metrics['state_loss']:.4f}"
                 )
-                transition.train()
+                transition_module.train()
 
                 # Prepare log dict and checkpoint data for deferred I/O after barrier
                 eval_log_dict = {
