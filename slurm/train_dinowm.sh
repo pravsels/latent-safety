@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=3
 #SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
 #SBATCH --requeue
