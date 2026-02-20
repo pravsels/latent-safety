@@ -1,0 +1,48 @@
+# Fast repro config to trigger eval/checkpoint paths immediately.
+# Keeps model/data settings the same as production config, but shortens cadence.
+#
+# Usage:
+#   python dino_wm/train_dino_wm.py --config configs/dino_wm_debug_eval_repro.yaml
+
+# Data
+hdf5_file: arx5_datasets_6Feb_26.h5
+dataset_stats: arx5_datasets_6Feb_26_stats.json
+test_frac: 0.1
+action_key: actions_delta
+
+# Training (short run for debugging)
+batch_size: 32
+train_iters: 20
+device: "cuda:0"
+seed: 42
+sequence_length: 4
+pred_step: 5
+action_horizon: 100
+future_action_steps_train: 100
+eval_horizon: 16
+context_length: 3
+
+# Stress paths likely involved in timeout
+eval_interval: 1
+eval_samples: 1
+save_every: 1
+
+# World Model / Decoder
+dino_version: "v3"
+dino_assets:
+  decoder_checkpoint_dir: /scratch/u6cr/pravsels.u6cr/latent_safety/dino3_decoder_checkpoints
+  wm_checkpoint_dir: /scratch/u6cr/pravsels.u6cr/latent_safety/dino3_wm_checkpoints
+
+# Resume behavior
+auto_resume: true
+
+# WandB
+wandb_mode: offline
+wandb_project: dino-WM-action-horizon
+wandb_entity: pravsels
+wandb_name: dinov3-wm-debug-eval-repro
+
+# Optimizer / LR scheduling
+lr_schedule: cosine
+lr_min_factor: 0.1
+lr_warmup_iters: 1000

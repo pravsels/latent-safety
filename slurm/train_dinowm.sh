@@ -16,6 +16,12 @@ set -e
 module purge
 module load brics/apptainer-multi-node
 
+# Optional submit profile:
+#   sbatch slurm/train_dinowm.sh
+#   sbatch slurm/train_dinowm.sh debug
+#   sbatch slurm/train_dinowm.sh debug-heavy
+PROFILE="${1:-default}"
+
 # Paths
 home_dir="/home/u6cr/pravsels.u6cr"
 scratch_dir="/scratch/u6cr/pravsels.u6cr"
@@ -31,7 +37,22 @@ WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 # Training config
 HDF5_FILE="${data_dir}/arx5_datasets_6Feb_26.h5"
 STATS_FILE="${data_dir}/arx5_datasets_6Feb_26_stats.json"
-CONFIG_FILE="configs/dino_wm_config.yaml"
+case "${PROFILE}" in
+    default)
+        CONFIG_FILE="configs/dino_wm_config.yaml"
+        ;;
+    debug)
+        CONFIG_FILE="configs/dino_wm_debug_eval_repro.yaml"
+        ;;
+    debug-heavy)
+        CONFIG_FILE="configs/dino_wm_debug_eval_repro_heavy.yaml"
+        ;;
+    *)
+        echo "Unknown profile: ${PROFILE}"
+        echo "Valid profiles: default | debug | debug-heavy"
+        exit 2
+        ;;
+esac
 CONFIG_PATH="${repo_dir}/${CONFIG_FILE}"
 
 mkdir -p "${PYTHON_EXT_DIR}" "${HF_CACHE}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
@@ -70,6 +91,8 @@ INSTALL_TORCHMETRICS_CMD="python -m pip install --upgrade --no-deps --target ${P
 
 echo "Running stats and training..."
 echo "Command: ${STATS_CMD} && ${TRAIN_CMD}"
+echo "Profile: ${PROFILE}"
+echo "Config: ${CONFIG_FILE}"
 echo ""
 
 # Resolve MASTER_ADDR on the host (scontrol is not available inside the container).
@@ -92,6 +115,10 @@ apptainer exec --nv \
         export RANK=\${SLURM_PROCID} WORLD_SIZE=\${SLURM_NTASKS} LOCAL_RANK=\${SLURM_LOCALID} && \
         export MASTER_ADDR=${MASTER_ADDR} && \
         export MASTER_PORT=${MASTER_PORT} && \
+        if [ \"${PROFILE}\" != \"default\" ]; then \
+            export TORCH_DISTRIBUTED_DEBUG=DETAIL NCCL_DEBUG=INFO TORCH_NCCL_TRACE_BUFFER_SIZE=1048576; \
+        fi && \
+        if [ ! -f ${CONFIG_PATH} ]; then echo \"Missing config: ${CONFIG_PATH}\"; exit 2; fi && \
         echo \"[task \${RANK}] RANK=\${RANK} WORLD_SIZE=\${WORLD_SIZE} LOCAL_RANK=\${LOCAL_RANK} MASTER_ADDR=\${MASTER_ADDR} MASTER_PORT=\${MASTER_PORT}\" && \
         if ! python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(\"torchmetrics\") else 1)'; then \
             ${INSTALL_TORCHMETRICS_CMD}; \
