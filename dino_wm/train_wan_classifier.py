@@ -567,7 +567,7 @@ def main(argv=None):
                     vid = torch.cat([torch.cat([gt_im1, gt_im2], dim=-3) / 255.0, torch.cat([im1s, im2s], dim=-3)], dim=-2)
                     vid = rearrange(vid[h:], "t h w c -> t c h w").detach().cpu().numpy()
                     vid = (vid * 255).clip(0, 255).astype(np.uint8)
-                    wandb.log({"video": wandb.Video(vid, fps=20)})
+                    wandb.log({"video": wandb.Video(vid, fps=20, format="mp4")})
 
                     heldout = next(expert_loader_eval)
                     held_front = heldout[args.front_latent_key].to(device)

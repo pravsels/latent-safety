@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import random
 import json
+from datetime import timedelta
 
 import h5py
 import torch
@@ -109,10 +110,13 @@ def init_distributed_from_env() -> tuple[int, int, int, bool]:
         # still be >0 (from SLURM_LOCALID), so clamp to visible devices.
         if torch.cuda.is_available():
             local_rank = local_rank % torch.cuda.device_count()
+        # Allow longer collectives for heavy rank0-only eval/logging blocks.
+        ddp_timeout_s = int(os.environ.get("TORCH_DDP_TIMEOUT_SECONDS", "1200"))
         torch.distributed.init_process_group(
             backend="nccl",
             rank=rank,
             world_size=world_size,
+            timeout=timedelta(seconds=ddp_timeout_s),
         )
         torch.cuda.set_device(local_rank)
     return rank, world_size, local_rank, is_distributed

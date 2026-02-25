@@ -788,7 +788,7 @@ def main(argv=None):
                     vid = vid.detach().cpu().numpy()
                     vid = (vid * 255).clip(0, 255).astype(np.uint8)
 
-                    wandb.log({"video": wandb.Video(vid, fps=20)})
+                    wandb.log({"video": wandb.Video(vid, fps=20, format="mp4")})
 
                     # Compute eval loss on held-out batch
                     eval_data = next(expert_loader_eval)
