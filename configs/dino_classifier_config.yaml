@@ -16,6 +16,7 @@ context_length: 3
 eval_horizon: 16
 train_iters: 10000
 eval_interval: 500
+log_eval_video: false
 learning_rate: 5.0e-5
 seed: 0
 device: "cuda:0"

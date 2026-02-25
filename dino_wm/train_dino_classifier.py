@@ -201,6 +201,19 @@ def parse_args(argv=None):
         help="Evaluation interval in iterations (default: 500).",
     )
     parser.add_argument(
+        "--log-eval-video",
+        dest="log_eval_video",
+        action="store_true",
+        help="Enable eval rollout video logging to wandb.",
+    )
+    parser.add_argument(
+        "--no-log-eval-video",
+        dest="log_eval_video",
+        action="store_false",
+        help="Disable eval rollout video logging to wandb.",
+    )
+    parser.set_defaults(log_eval_video=True)
+    parser.add_argument(
         "--device",
         type=str,
         default="cuda:0",
@@ -714,81 +727,82 @@ def main(argv=None):
                         eval_states, state_min, state_max, q02=state_q02, q98=state_q98
                     )
                     
-                    # Get decoder output size from config
-                    decoder_h, decoder_w = DECODER_CONFIG['decoder_image_size']
-                    
-                    # Load and resize ground truth to match decoder output
-                    im1s_raw = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.
-                    im2s_raw = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
-                    
-                    im1s = torch.nn.functional.interpolate(
-                        im1s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
-                        mode='bilinear', align_corners=False
-                    ).permute(0,2,3,1)
-                    im2s = torch.nn.functional.interpolate(
-                        im2s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
-                        mode='bilinear', align_corners=False
-                    ).permute(0,2,3,1)
-                    
-                    for k in range(EVAL_H-H):
-                        t = (H - 1) + k
-                        future_actions = all_acs[:, t + 1 : t + 1 + max_future_len]
-                        pred1, pred2, pred_state, pred_fail = transition(
-                            inputs1, inputs2, states, acs, future_actions
-                        )
-                        pred_latent = torch.cat([pred1[:,[-1]], pred2[:,[-1]]], dim=0)
-                        pred_ims, _ = decoder(pred_latent)
-
-                        pred_ims = rearrange(pred_ims, "(b t) c h w -> b t c h w", t=1)
-                        pred_im1, pred_im2 = torch.split(pred_ims, [inputs1.shape[0], inputs2.shape[0]], dim=0)
-
-                        pred_im1 = pred_im1[0].permute(0,2,3,1).detach()
-                        pred_im2 = pred_im2[0].permute(0,2,3,1).detach()
-                        pred_fail = pred_fail[:,-1]
-
-                        if pred_fail < 0:
-                            pred_im1[:,:,:,0] *= 2
-                            pred_im2[:,:,:,0] *= 2
+                    if args.log_eval_video:
+                        # Get decoder output size from config
+                        decoder_h, decoder_w = DECODER_CONFIG['decoder_image_size']
                         
-                        im1s = torch.cat([im1s, pred_im1], dim=0)
-                        im2s = torch.cat([im2s, pred_im2], dim=0)
+                        # Load and resize ground truth to match decoder output
+                        im1s_raw = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.
+                        im2s_raw = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
                         
-                        # getting next inputs
-                        acs = torch.cat([acs[[0], 1:], all_acs[0,H+k].unsqueeze(0).unsqueeze(0)], dim=1)
-                        inputs1 = torch.cat([inputs1[[0], 1:], pred1[:, -1].unsqueeze(1)], dim=1)
-                        inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
-                        states = torch.cat([states[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
-                    
-                    gt_im1_raw = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device).float()
-                    gt_im2_raw = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device).float()
-                    
-                    gt_im1 = torch.nn.functional.interpolate(
-                        gt_im1_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
-                        mode='bilinear', align_corners=False
-                    ).permute(0,2,3,1)
-                    gt_im2 = torch.nn.functional.interpolate(
-                        gt_im2_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
-                        mode='bilinear', align_corners=False
-                    ).permute(0,2,3,1)
-                    
-                    gt_fail = eval_data['failure'][[0], :EVAL_H].squeeze().to(device)
-                    
-                    for j in range(EVAL_H):
-                        if gt_fail[j] > 0:
-                            gt_im1[j,:,:,0] *= 2
-                            gt_im2[j,:,:,0] *= 2
-                    
-                    gt_imgs = torch.cat([gt_im1, gt_im2], dim=-3)/255.
-                    pred_imgs = torch.cat([im1s, im2s], dim=-3)
+                        im1s = torch.nn.functional.interpolate(
+                            im1s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                            mode='bilinear', align_corners=False
+                        ).permute(0,2,3,1)
+                        im2s = torch.nn.functional.interpolate(
+                            im2s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                            mode='bilinear', align_corners=False
+                        ).permute(0,2,3,1)
+                        
+                        for k in range(EVAL_H-H):
+                            t = (H - 1) + k
+                            future_actions = all_acs[:, t + 1 : t + 1 + max_future_len]
+                            pred1, pred2, pred_state, pred_fail = transition(
+                                inputs1, inputs2, states, acs, future_actions
+                            )
+                            pred_latent = torch.cat([pred1[:,[-1]], pred2[:,[-1]]], dim=0)
+                            pred_ims, _ = decoder(pred_latent)
 
-                    vid = torch.cat([gt_imgs, pred_imgs], dim=-2)
-                    vid = vid[H:]
+                            pred_ims = rearrange(pred_ims, "(b t) c h w -> b t c h w", t=1)
+                            pred_im1, pred_im2 = torch.split(pred_ims, [inputs1.shape[0], inputs2.shape[0]], dim=0)
 
-                    vid = rearrange(vid, "t h w c -> t c h w")
-                    vid = vid.detach().cpu().numpy()
-                    vid = (vid * 255).clip(0, 255).astype(np.uint8)
+                            pred_im1 = pred_im1[0].permute(0,2,3,1).detach()
+                            pred_im2 = pred_im2[0].permute(0,2,3,1).detach()
+                            pred_fail = pred_fail[:,-1]
 
-                    wandb.log({"video": wandb.Video(vid, fps=20, format="mp4")})
+                            if pred_fail < 0:
+                                pred_im1[:,:,:,0] *= 2
+                                pred_im2[:,:,:,0] *= 2
+                            
+                            im1s = torch.cat([im1s, pred_im1], dim=0)
+                            im2s = torch.cat([im2s, pred_im2], dim=0)
+                            
+                            # getting next inputs
+                            acs = torch.cat([acs[[0], 1:], all_acs[0,H+k].unsqueeze(0).unsqueeze(0)], dim=1)
+                            inputs1 = torch.cat([inputs1[[0], 1:], pred1[:, -1].unsqueeze(1)], dim=1)
+                            inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
+                            states = torch.cat([states[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
+                        
+                        gt_im1_raw = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device).float()
+                        gt_im2_raw = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device).float()
+                        
+                        gt_im1 = torch.nn.functional.interpolate(
+                            gt_im1_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                            mode='bilinear', align_corners=False
+                        ).permute(0,2,3,1)
+                        gt_im2 = torch.nn.functional.interpolate(
+                            gt_im2_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                            mode='bilinear', align_corners=False
+                        ).permute(0,2,3,1)
+                        
+                        gt_fail = eval_data['failure'][[0], :EVAL_H].squeeze().to(device)
+                        
+                        for j in range(EVAL_H):
+                            if gt_fail[j] > 0:
+                                gt_im1[j,:,:,0] *= 2
+                                gt_im2[j,:,:,0] *= 2
+                        
+                        gt_imgs = torch.cat([gt_im1, gt_im2], dim=-3)/255.
+                        pred_imgs = torch.cat([im1s, im2s], dim=-3)
+
+                        vid = torch.cat([gt_imgs, pred_imgs], dim=-2)
+                        vid = vid[H:]
+
+                        vid = rearrange(vid, "t h w c -> t c h w")
+                        vid = vid.detach().cpu().numpy()
+                        vid = (vid * 255).clip(0, 255).astype(np.uint8)
+
+                        wandb.log({"video": wandb.Video(vid, fps=20, format="mp4")})
 
                     # Compute eval loss on held-out batch
                     eval_data = next(expert_loader_eval)

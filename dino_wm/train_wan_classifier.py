@@ -194,6 +194,19 @@ def parse_args(argv=None):
     parser.add_argument("--eval-horizon", type=int, default=16)
     parser.add_argument("--train-iters", type=int, default=10000)
     parser.add_argument("--eval-interval", type=int, default=500)
+    parser.add_argument(
+        "--log-eval-video",
+        dest="log_eval_video",
+        action="store_true",
+        help="Enable eval rollout video logging to wandb.",
+    )
+    parser.add_argument(
+        "--no-log-eval-video",
+        dest="log_eval_video",
+        action="store_false",
+        help="Disable eval rollout video logging to wandb.",
+    )
+    parser.set_defaults(log_eval_video=True)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--wm-checkpoint", type=str, default="wan_wm_checkpoints/best_wm.pth")
     parser.add_argument("--checkpoint-dir", type=str, default="wan_classifier_checkpoints")
@@ -517,57 +530,58 @@ def main(argv=None):
                         q98=state_q98,
                     )
 
-                    decoder_h, decoder_w = MODEL_CONFIG["image_size"]
-                    im1s_raw = eval_data["agentview_image"][[0], :h].squeeze().to(device) / 255.0
-                    im2s_raw = eval_data["robot0_eye_in_hand_image"][[0], :h].squeeze().to(device) / 255.0
-                    im1s = F.interpolate(
-                        im1s_raw.permute(0, 3, 1, 2), size=(decoder_h, decoder_w), mode="bilinear", align_corners=False
-                    ).permute(0, 2, 3, 1)
-                    im2s = F.interpolate(
-                        im2s_raw.permute(0, 3, 1, 2), size=(decoder_h, decoder_w), mode="bilinear", align_corners=False
-                    ).permute(0, 2, 3, 1)
+                    if args.log_eval_video:
+                        decoder_h, decoder_w = MODEL_CONFIG["image_size"]
+                        im1s_raw = eval_data["agentview_image"][[0], :h].squeeze().to(device) / 255.0
+                        im2s_raw = eval_data["robot0_eye_in_hand_image"][[0], :h].squeeze().to(device) / 255.0
+                        im1s = F.interpolate(
+                            im1s_raw.permute(0, 3, 1, 2), size=(decoder_h, decoder_w), mode="bilinear", align_corners=False
+                        ).permute(0, 2, 3, 1)
+                        im2s = F.interpolate(
+                            im2s_raw.permute(0, 3, 1, 2), size=(decoder_h, decoder_w), mode="bilinear", align_corners=False
+                        ).permute(0, 2, 3, 1)
 
-                    for k in range(eval_h - h):
-                        t = (h - 1) + k
-                        future_actions = all_acs[:, t + 1 : t + 1 + max_future_len]
-                        pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs, future_actions)
+                        for k in range(eval_h - h):
+                            t = (h - 1) + k
+                            future_actions = all_acs[:, t + 1 : t + 1 + max_future_len]
+                            pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs, future_actions)
 
-                        pred_im1 = wan_decoder.decode_tokens(pred1[:, [-1]]).squeeze(0).squeeze(0)
-                        pred_im2 = wan_decoder.decode_tokens(pred2[:, [-1]]).squeeze(0).squeeze(0)
-                        pred_fail_last = pred_fail[:, -1].squeeze(-1)
-                        if pred_fail_last.item() < 0:
-                            pred_im1[:, :, 0] *= 2
-                            pred_im2[:, :, 0] *= 2
+                            pred_im1 = wan_decoder.decode_tokens(pred1[:, [-1]]).squeeze(0).squeeze(0)
+                            pred_im2 = wan_decoder.decode_tokens(pred2[:, [-1]]).squeeze(0).squeeze(0)
+                            pred_fail_last = pred_fail[:, -1].squeeze(-1)
+                            if pred_fail_last.item() < 0:
+                                pred_im1[:, :, 0] *= 2
+                                pred_im2[:, :, 0] *= 2
 
-                        im1s = torch.cat([im1s, pred_im1.unsqueeze(0)], dim=0)
-                        im2s = torch.cat([im2s, pred_im2.unsqueeze(0)], dim=0)
-                        acs = torch.cat([acs[:, 1:], all_acs[:, h + k : h + k + 1]], dim=1)
-                        inputs1 = torch.cat([inputs1[:, 1:], pred1[:, -1].unsqueeze(1)], dim=1)
-                        inputs2 = torch.cat([inputs2[:, 1:], pred2[:, -1].unsqueeze(1)], dim=1)
-                        states = torch.cat([states[:, 1:], pred_state[:, -1].unsqueeze(1)], dim=1)
+                            im1s = torch.cat([im1s, pred_im1.unsqueeze(0)], dim=0)
+                            im2s = torch.cat([im2s, pred_im2.unsqueeze(0)], dim=0)
+                            acs = torch.cat([acs[:, 1:], all_acs[:, h + k : h + k + 1]], dim=1)
+                            inputs1 = torch.cat([inputs1[:, 1:], pred1[:, -1].unsqueeze(1)], dim=1)
+                            inputs2 = torch.cat([inputs2[:, 1:], pred2[:, -1].unsqueeze(1)], dim=1)
+                            states = torch.cat([states[:, 1:], pred_state[:, -1].unsqueeze(1)], dim=1)
 
-                    gt_im1 = F.interpolate(
-                        eval_data["agentview_image"][[0], :eval_h].squeeze().to(device).float().permute(0, 3, 1, 2),
-                        size=(decoder_h, decoder_w),
-                        mode="bilinear",
-                        align_corners=False,
-                    ).permute(0, 2, 3, 1)
-                    gt_im2 = F.interpolate(
-                        eval_data["robot0_eye_in_hand_image"][[0], :eval_h].squeeze().to(device).float().permute(0, 3, 1, 2),
-                        size=(decoder_h, decoder_w),
-                        mode="bilinear",
-                        align_corners=False,
-                    ).permute(0, 2, 3, 1)
-                    gt_fail = eval_data["failure"][[0], :eval_h].squeeze().to(device)
-                    for j in range(eval_h):
-                        if gt_fail[j] > 0:
-                            gt_im1[j, :, :, 0] *= 2
-                            gt_im2[j, :, :, 0] *= 2
+                        gt_im1 = F.interpolate(
+                            eval_data["agentview_image"][[0], :eval_h].squeeze().to(device).float().permute(0, 3, 1, 2),
+                            size=(decoder_h, decoder_w),
+                            mode="bilinear",
+                            align_corners=False,
+                        ).permute(0, 2, 3, 1)
+                        gt_im2 = F.interpolate(
+                            eval_data["robot0_eye_in_hand_image"][[0], :eval_h].squeeze().to(device).float().permute(0, 3, 1, 2),
+                            size=(decoder_h, decoder_w),
+                            mode="bilinear",
+                            align_corners=False,
+                        ).permute(0, 2, 3, 1)
+                        gt_fail = eval_data["failure"][[0], :eval_h].squeeze().to(device)
+                        for j in range(eval_h):
+                            if gt_fail[j] > 0:
+                                gt_im1[j, :, :, 0] *= 2
+                                gt_im2[j, :, :, 0] *= 2
 
-                    vid = torch.cat([torch.cat([gt_im1, gt_im2], dim=-3) / 255.0, torch.cat([im1s, im2s], dim=-3)], dim=-2)
-                    vid = rearrange(vid[h:], "t h w c -> t c h w").detach().cpu().numpy()
-                    vid = (vid * 255).clip(0, 255).astype(np.uint8)
-                    wandb.log({"video": wandb.Video(vid, fps=20, format="mp4")})
+                        vid = torch.cat([torch.cat([gt_im1, gt_im2], dim=-3) / 255.0, torch.cat([im1s, im2s], dim=-3)], dim=-2)
+                        vid = rearrange(vid[h:], "t h w c -> t c h w").detach().cpu().numpy()
+                        vid = (vid * 255).clip(0, 255).astype(np.uint8)
+                        wandb.log({"video": wandb.Video(vid, fps=20, format="mp4")})
 
                     heldout = next(expert_loader_eval)
                     held_front = heldout[args.front_latent_key].to(device)
