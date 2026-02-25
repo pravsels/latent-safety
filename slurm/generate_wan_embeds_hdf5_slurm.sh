@@ -29,7 +29,7 @@ HF_TOKEN_FILE="${home_dir}/.hf_token"
 INPUT_HDF5="${data_dir}/bin_pick_pack_combined_labeled_dino3.h5"
 OUTPUT_HDF5="${data_dir}/bin_pick_pack_combined_labeled_wan224.h5"
 WAN_MODEL="ByteDance/Video-As-Prompt-Wan2.1-14B"
-BATCH_SIZE=256
+BATCH_SIZE=512
 
 mkdir -p "${data_dir}" "${HF_CACHE}" "${PYTHON_EXT_DIR}" \
   "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
