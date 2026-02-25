@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=dino_classifier
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:1
-#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --ntasks-per-node=4
 #SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=64G
+#SBATCH --mem=0G
+#SBATCH --exclusive
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
 #SBATCH --requeue
@@ -41,21 +42,26 @@ echo "Node: ${SLURM_NODELIST}"
 echo "Started (UTC): ${start_time}"
 echo "===================================="
 
-# Resume from iteration 3001 (previous run completed iter 3000)
-# Note: Once a new checkpoint is saved with iteration info, this can be removed
-# and the script will auto-resume from the stored iteration.
-# START_ITER=3001
-
 TRAIN_CMD="python dino_wm/train_dino_classifier.py \
-    --config ${CONFIG_FILE} \
-    --start-iter ${START_ITER}"
+    --config ${CONFIG_FILE}"
+
+if [ -n "${START_ITER:-}" ]; then
+    TRAIN_CMD="${TRAIN_CMD} --start-iter ${START_ITER}"
+fi
 
 echo "Running training command..."
 echo "Command: ${TRAIN_CMD}"
 echo ""
 
+# Resolve MASTER_ADDR on host (scontrol is unavailable inside container).
+MASTER_ADDR=$(scontrol show hostnames "${SLURM_NODELIST}" | head -n 1)
+MASTER_PORT="${MASTER_PORT:-29500}"
+echo "DDP env (host-side): MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
+echo "SLURM vars: SLURM_NODELIST=${SLURM_NODELIST}, SLURM_NTASKS=${SLURM_NTASKS}"
+echo ""
+
 set +e
-srun --ntasks=1 --gpus-per-task=1 --cpu-bind=cores \
+srun --ntasks=4 --gpus=4 --cpu-bind=cores \
 apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \
@@ -65,6 +71,10 @@ apptainer exec --nv \
     bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
         export LATENT_SAFETY_DATA_ROOT=${data_dir} && \
         export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
+        export RANK=\${SLURM_PROCID} WORLD_SIZE=\${SLURM_NTASKS} LOCAL_RANK=\${SLURM_LOCALID} && \
+        export MASTER_ADDR=${MASTER_ADDR} && \
+        export MASTER_PORT=${MASTER_PORT} && \
+        echo \"[task \${RANK}] RANK=\${RANK} WORLD_SIZE=\${WORLD_SIZE} LOCAL_RANK=\${LOCAL_RANK} MASTER_ADDR=\${MASTER_ADDR} MASTER_PORT=\${MASTER_PORT}\" && \
         ${TRAIN_CMD}"
 EXIT_CODE=$?
 set -e

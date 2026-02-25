@@ -1,0 +1,46 @@
+# Default configuration for training WAN failure classifier head.
+# Usage:
+#   python dino_wm/train_wan_classifier.py --config configs/wan_classifier_config.yaml
+
+# Data
+hdf5_file: bin_pick_pack_combined_labeled_wan224.h5
+dataset_stats: bin_pick_pack_combined_labeled_stats.json
+action_key: actions_delta
+front_latent_key: wan_front_embd
+wrist_latent_key: wan_wrist_embd
+test_frac: 0.1
+num_test_trajectories: null
+
+# Training
+batch_size: 8
+sequence_length: 4
+context_length: 3
+eval_horizon: 16
+train_iters: 10000
+eval_interval: 500
+learning_rate: 5.0e-5
+seed: 0
+device: "cuda:0"
+
+# Future-action conditioning
+action_horizon: 100
+future_action_steps_train: 100
+
+# WAN VAE decoder (for eval video logging)
+wan_vae_model: ByteDance/Video-As-Prompt-Wan2.1-14B
+wan_vae_subfolder: vae
+wan_vae_dtype: bf16
+wan_latent_height: 0
+wan_latent_width: 0
+
+# Checkpoints
+wm_checkpoint: wan_wm_checkpoints/best_wm.pth
+checkpoint_dir: wan_classifier_checkpoints
+resume_checkpoint: null
+start_iter: 0
+
+# WandB
+wandb_mode: offline
+wandb_project: wan_wm_action_traj_classifier
+wandb_entity: pravsels
+wandb_name: bin_pick_pack_classifier

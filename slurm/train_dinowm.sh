@@ -5,7 +5,8 @@
 #SBATCH --ntasks-per-node=3
 #SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=128G
+#SBATCH --mem=0G
+#SBATCH --exclusive
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
 #SBATCH --requeue
@@ -107,7 +108,7 @@ echo "SLURM vars: SLURM_NODELIST=${SLURM_NODELIST}, SLURM_NTASKS=${SLURM_NTASKS}
 echo ""
 
 set +e
-srun --ntasks=3 --cpu-bind=cores \
+srun --ntasks=3 --gpus=4 --cpu-bind=cores \
 apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \

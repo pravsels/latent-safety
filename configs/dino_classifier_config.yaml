@@ -10,7 +10,7 @@ test_frac: 0.1
 num_test_trajectories: null
 
 # Training
-batch_size: 256
+batch_size: 64
 sequence_length: 4
 context_length: 3
 eval_horizon: 16
@@ -35,6 +35,6 @@ start_iter: 0
 
 # WandB
 wandb_mode: offline
-wandb_project: latent-safety
+wandb_project: dino3_wm_action_traj_classifier
 wandb_entity: pravsels
-wandb_name: cubes_push_classifier
+wandb_name: bin_pick_pack_classifier

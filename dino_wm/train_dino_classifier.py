@@ -33,6 +33,7 @@ import torch
 import random
 import wandb
 from torch.optim import AdamW
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from einops import rearrange
 from tqdm import tqdm
@@ -46,7 +47,12 @@ from dino_models import (
     normalize_states,
 )
 from checkpoint_utils import filter_state_dict_by_shape
-from train_wm_common import load_yaml_config as _load_yaml_config, sample_future_action_window
+from train_wm_common import (
+    build_train_loader,
+    init_distributed_from_env,
+    load_yaml_config as _load_yaml_config,
+    sample_future_action_window,
+)
 from dino_wm.config import (
     MODEL_CONFIG,
     TRAIN_CONFIG,
@@ -317,6 +323,8 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    rank, world_size, local_rank, is_distributed = init_distributed_from_env()
+    is_rank0 = rank == 0
 
     if args.hdf5_file is None:
         raise ValueError(
@@ -351,21 +359,27 @@ def main(argv=None):
     args.resume_checkpoint = _resolve_data_path(args.resume_checkpoint)
     args.checkpoint_dir = _resolve_data_path(args.checkpoint_dir, prefer_data_root=True)
 
-    # Initialize wandb
-    wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_name,
-        entity=args.wandb_entity,
-        mode=args.wandb_mode,
-        config=vars(args)
-    )
+    if is_distributed and str(args.device).startswith("cuda"):
+        device = f"cuda:{local_rank}"
+    else:
+        device = args.device
 
-    use_amp = True
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    if is_rank0:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_name,
+            entity=args.wandb_entity,
+            mode=args.wandb_mode,
+            config=vars(args)
+        )
+
+    use_amp = str(device).startswith("cuda") and torch.cuda.is_available()
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     # Set seeds
     torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
 
@@ -373,7 +387,6 @@ def main(argv=None):
     BL = args.sequence_length
     EVAL_H = args.eval_horizon
     H = args.context_length
-    device = args.device
     action_horizon = int(args.action_horizon)
     future_action_steps_train = int(args.future_action_steps_train)
 
@@ -453,9 +466,20 @@ def main(argv=None):
     print(f"  Train: {num_traj - num_test} trajectories")
     print(f"  Eval:  {num_test} trajectories")
 
-    expert_loader = iter(DataLoader(expert_data, batch_size=BS, shuffle=True))
-    expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
-    expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
+    train_loader, train_sampler = build_train_loader(
+        expert_data,
+        BS,
+        is_distributed=is_distributed,
+        rank=rank,
+        world_size=world_size,
+    )
+    expert_loader = iter(train_loader)
+    if is_rank0:
+        expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
+        expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
+    else:
+        expert_loader_eval = None
+        expert_loader_imagine = None
    
     # Configure model dimensions and image sizes based on selected DINO version
     dino_cfg = get_dino_config(args.dino_version)
@@ -472,7 +496,8 @@ def main(argv=None):
     else:
         decoder.load_state_dict(decoder_ckpt)
     decoder.eval()
-    print(f"Loaded decoder from {args.decoder_checkpoint}")
+    if is_rank0:
+        print(f"Loaded decoder from {args.decoder_checkpoint}")
 
     # Initialize world model and load checkpoint
     transition = VideoTransformer(
@@ -483,33 +508,37 @@ def main(argv=None):
         dino_version=args.dino_version,
         **MODEL_CONFIG
     ).to(device)
+    if is_distributed:
+        transition = DistributedDataParallel(transition, device_ids=[local_rank], find_unused_parameters=True)
+    transition_module = transition.module if is_distributed else transition
     
     # Always load the world model backbone first
-    print(f"Loading world model from {args.wm_checkpoint}")
+    if is_rank0:
+        print(f"Loading world model from {args.wm_checkpoint}")
     wm_ckpt = torch.load(args.wm_checkpoint, map_location=device)
     if isinstance(wm_ckpt, dict) and 'model_state_dict' in wm_ckpt:
         wm_state = wm_ckpt['model_state_dict']
     else:
         wm_state = wm_ckpt
     filtered, missing, unexpected, mismatched = filter_state_dict_by_shape(
-        transition.state_dict(),
+        transition_module.state_dict(),
         wm_state,
     )
-    transition.load_state_dict(filtered, strict=False)
-    if missing:
+    transition_module.load_state_dict(filtered, strict=False)
+    if is_rank0 and missing:
         print(f"Warning: missing {len(missing)} keys from world-model checkpoint.")
-    if unexpected:
+    if is_rank0 and unexpected:
         print(f"Warning: world-model checkpoint has {len(unexpected)} unexpected keys.")
-    if mismatched:
+    if is_rank0 and mismatched:
         print(f"Warning: skipped {len(mismatched)} mismatched world-model keys.")
 
     # Freeze all parameters except failure head
-    for name, param in transition.named_parameters():
+    for name, param in transition_module.named_parameters():
         param.requires_grad = name.startswith("failure_head")
 
     # Optimizer for failure head only
     optimizer = AdamW([
-        {'params': transition.failure_head.parameters(), 'lr': args.learning_rate}, 
+        {'params': transition_module.failure_head.parameters(), 'lr': args.learning_rate},
     ])
 
     # Load checkpoint for resuming training
@@ -524,68 +553,93 @@ def main(argv=None):
     
     if args.resume_checkpoint is not None:
         # Explicit checkpoint specified
-        print(f"\n{'='*60}")
-        print(f"RESUMING TRAINING - Using explicit checkpoint")
-        print(f"{'='*60}")
+        if is_rank0:
+            print(f"\n{'='*60}")
+            print(f"RESUMING TRAINING - Using explicit checkpoint")
+            print(f"{'='*60}")
         ckpt = torch.load(args.resume_checkpoint, map_location=device)
         if isinstance(ckpt, dict):
             if 'failure_head_state_dict' in ckpt:
-                transition.failure_head.load_state_dict(ckpt['failure_head_state_dict'])
-                print(f"  Loaded failure head weights from: {args.resume_checkpoint}")
+                transition_module.failure_head.load_state_dict(ckpt['failure_head_state_dict'])
+                if is_rank0:
+                    print(f"  Loaded failure head weights from: {args.resume_checkpoint}")
             else:
-                transition.failure_head.load_state_dict(ckpt)
-                print(f"  Loaded failure head weights from: {args.resume_checkpoint}")
+                transition_module.failure_head.load_state_dict(ckpt)
+                if is_rank0:
+                    print(f"  Loaded failure head weights from: {args.resume_checkpoint}")
             if 'best_eval' in ckpt:
                 best_eval = ckpt['best_eval']
-                print(f"  Previous best eval loss: {best_eval:.4f}")
+                if is_rank0:
+                    print(f"  Previous best eval loss: {best_eval:.4f}")
             if 'iteration' in ckpt and args.start_iter == 0:
                 start_iter = ckpt['iteration'] + 1
-                print(f"  Resuming from iteration: {start_iter}")
+                if is_rank0:
+                    print(f"  Resuming from iteration: {start_iter}")
             elif args.start_iter > 0:
-                print(f"  Using explicit start iteration: {args.start_iter}")
+                if is_rank0:
+                    print(f"  Using explicit start iteration: {args.start_iter}")
         else:
-            transition.failure_head.load_state_dict(ckpt)
-            print(f"  Loaded failure head weights from: {args.resume_checkpoint}")
+            transition_module.failure_head.load_state_dict(ckpt)
+            if is_rank0:
+                print(f"  Loaded failure head weights from: {args.resume_checkpoint}")
             if args.start_iter > 0:
-                print(f"  Using explicit start iteration: {args.start_iter}")
-        print(f"{'='*60}\n")
+                if is_rank0:
+                    print(f"  Using explicit start iteration: {args.start_iter}")
+        if is_rank0:
+            print(f"{'='*60}\n")
         
     elif os.path.exists(best_ckpt_path):
         # Auto-load from best checkpoint
-        print(f"\n{'='*60}")
-        print(f"RESUMING TRAINING - Found existing checkpoint")
-        print(f"{'='*60}")
+        if is_rank0:
+            print(f"\n{'='*60}")
+            print(f"RESUMING TRAINING - Found existing checkpoint")
+            print(f"{'='*60}")
         best_ckpt = torch.load(best_ckpt_path, map_location=device)
         if isinstance(best_ckpt, dict):
             if 'failure_head_state_dict' in best_ckpt:
-                transition.failure_head.load_state_dict(best_ckpt['failure_head_state_dict'])
-                print(f"  Loaded failure head weights from: {best_ckpt_path}")
+                transition_module.failure_head.load_state_dict(best_ckpt['failure_head_state_dict'])
+                if is_rank0:
+                    print(f"  Loaded failure head weights from: {best_ckpt_path}")
             if 'best_eval' in best_ckpt:
                 best_eval = best_ckpt['best_eval']
-                print(f"  Previous best eval loss: {best_eval:.4f}")
+                if is_rank0:
+                    print(f"  Previous best eval loss: {best_eval:.4f}")
             if 'iteration' in best_ckpt and args.start_iter == 0:
                 start_iter = best_ckpt['iteration'] + 1
-                print(f"  Resuming from iteration: {start_iter}")
+                if is_rank0:
+                    print(f"  Resuming from iteration: {start_iter}")
             elif args.start_iter > 0:
-                print(f"  Using explicit start iteration: {args.start_iter}")
-        print(f"{'='*60}\n")
+                if is_rank0:
+                    print(f"  Using explicit start iteration: {args.start_iter}")
+        if is_rank0:
+            print(f"{'='*60}\n")
         
     else:
         # Training from scratch
-        print(f"\n{'='*60}")
-        print(f"TRAINING FROM SCRATCH - No existing checkpoint found")
-        print(f"  Checkpoint dir: {args.checkpoint_dir}")
-        print(f"  Starting from iteration: {start_iter}")
-        print(f"{'='*60}\n")
+        if is_rank0:
+            print(f"\n{'='*60}")
+            print(f"TRAINING FROM SCRATCH - No existing checkpoint found")
+            print(f"  Checkpoint dir: {args.checkpoint_dir}")
+            print(f"  Starting from iteration: {start_iter}")
+            print(f"{'='*60}\n")
     
     train_iter = args.train_iters
 
-    for i in tqdm(range(start_iter, train_iter), desc="Training", unit="iter"):
-        if i > 0 and i % len(expert_loader) == 0:
-            expert_loader = iter(DataLoader(expert_data, batch_size=BS, shuffle=True))
-        if i > 0 and i % len(expert_loader_eval) == 0:
+    for i in tqdm(range(start_iter, train_iter), desc="Training", unit="iter", disable=not is_rank0):
+        if i > 0 and i % len(train_loader) == 0:
+            if train_sampler is not None:
+                train_sampler.set_epoch(i)
+            train_loader, train_sampler = build_train_loader(
+                expert_data,
+                BS,
+                is_distributed=is_distributed,
+                rank=rank,
+                world_size=world_size,
+            )
+            expert_loader = iter(train_loader)
+        if is_rank0 and i > 0 and i % len(expert_loader_eval) == 0:
             expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
-        if i > 0 and i % len(expert_loader_imagine) == 0:
+        if is_rank0 and i > 0 and i % len(expert_loader_imagine) == 0:
             expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
 
         data = next(expert_loader)
@@ -631,192 +685,200 @@ def main(argv=None):
         scaler.step(optimizer)
         scaler.update()
         train_loss = loss.item()
-        wandb.log({'train_loss': train_loss})
-        print(f"\rIter {i}, Train Loss: {train_loss:.4f}", end='', flush=True)
+        if is_rank0:
+            wandb.log({'train_loss': train_loss})
+            print(f"\rIter {i}, Train Loss: {train_loss:.4f}", end='', flush=True)
         
         if (i) % args.eval_interval == 0:
-            eval_data = next(expert_loader_imagine)
-            transition.eval()
-            with torch.no_grad():
-                eval_data1 = eval_data['cam_zed_embd'].to(device)
-                eval_data2 = eval_data['cam_rs_embd'].to(device)
+            if is_distributed:
+                torch.distributed.barrier()
+            if is_rank0:
+                eval_data = next(expert_loader_imagine)
+                transition_module.eval()
+                with torch.no_grad():
+                    eval_data1 = eval_data['cam_zed_embd'].to(device)
+                    eval_data2 = eval_data['cam_rs_embd'].to(device)
 
-                inputs1 = eval_data1[[0], :H]
-                inputs2 = eval_data2[[0], :H]
-                all_acs = eval_data['action'][[0]].to(device)
-                all_acs = normalize_acs(
-                    all_acs, action_min, action_max, q02=action_q02, q98=action_q98
-                )
-                acs = eval_data['action'][[0],:H].to(device)
-                acs = normalize_acs(
-                    acs, action_min, action_max, q02=action_q02, q98=action_q98
-                )
-                eval_states = eval_data['state'][[0],:H].to(device)
-                states = normalize_states(
-                    eval_states, state_min, state_max, q02=state_q02, q98=state_q98
-                )
-                
-                # Get decoder output size from config
-                decoder_h, decoder_w = DECODER_CONFIG['decoder_image_size']
-                
-                # Load and resize ground truth to match decoder output
-                im1s_raw = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.
-                im2s_raw = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
-                
-                im1s = torch.nn.functional.interpolate(
-                    im1s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
-                    mode='bilinear', align_corners=False
-                ).permute(0,2,3,1)
-                im2s = torch.nn.functional.interpolate(
-                    im2s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
-                    mode='bilinear', align_corners=False
-                ).permute(0,2,3,1)
-                
-                for k in range(EVAL_H-H):
-                    t = (H - 1) + k
-                    future_actions = all_acs[:, t + 1 : t + 1 + max_future_len]
+                    inputs1 = eval_data1[[0], :H]
+                    inputs2 = eval_data2[[0], :H]
+                    all_acs = eval_data['action'][[0]].to(device)
+                    all_acs = normalize_acs(
+                        all_acs, action_min, action_max, q02=action_q02, q98=action_q98
+                    )
+                    acs = eval_data['action'][[0],:H].to(device)
+                    acs = normalize_acs(
+                        acs, action_min, action_max, q02=action_q02, q98=action_q98
+                    )
+                    eval_states = eval_data['state'][[0],:H].to(device)
+                    states = normalize_states(
+                        eval_states, state_min, state_max, q02=state_q02, q98=state_q98
+                    )
+                    
+                    # Get decoder output size from config
+                    decoder_h, decoder_w = DECODER_CONFIG['decoder_image_size']
+                    
+                    # Load and resize ground truth to match decoder output
+                    im1s_raw = eval_data['agentview_image'][[0], :H].squeeze().to(device)/255.
+                    im2s_raw = eval_data['robot0_eye_in_hand_image'][[0], :H].squeeze().to(device)/255.
+                    
+                    im1s = torch.nn.functional.interpolate(
+                        im1s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                        mode='bilinear', align_corners=False
+                    ).permute(0,2,3,1)
+                    im2s = torch.nn.functional.interpolate(
+                        im2s_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                        mode='bilinear', align_corners=False
+                    ).permute(0,2,3,1)
+                    
+                    for k in range(EVAL_H-H):
+                        t = (H - 1) + k
+                        future_actions = all_acs[:, t + 1 : t + 1 + max_future_len]
+                        pred1, pred2, pred_state, pred_fail = transition(
+                            inputs1, inputs2, states, acs, future_actions
+                        )
+                        pred_latent = torch.cat([pred1[:,[-1]], pred2[:,[-1]]], dim=0)
+                        pred_ims, _ = decoder(pred_latent)
+
+                        pred_ims = rearrange(pred_ims, "(b t) c h w -> b t c h w", t=1)
+                        pred_im1, pred_im2 = torch.split(pred_ims, [inputs1.shape[0], inputs2.shape[0]], dim=0)
+
+                        pred_im1 = pred_im1[0].permute(0,2,3,1).detach()
+                        pred_im2 = pred_im2[0].permute(0,2,3,1).detach()
+                        pred_fail = pred_fail[:,-1]
+
+                        if pred_fail < 0:
+                            pred_im1[:,:,:,0] *= 2
+                            pred_im2[:,:,:,0] *= 2
+                        
+                        im1s = torch.cat([im1s, pred_im1], dim=0)
+                        im2s = torch.cat([im2s, pred_im2], dim=0)
+                        
+                        # getting next inputs
+                        acs = torch.cat([acs[[0], 1:], all_acs[0,H+k].unsqueeze(0).unsqueeze(0)], dim=1)
+                        inputs1 = torch.cat([inputs1[[0], 1:], pred1[:, -1].unsqueeze(1)], dim=1)
+                        inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
+                        states = torch.cat([states[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
+                    
+                    gt_im1_raw = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device).float()
+                    gt_im2_raw = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device).float()
+                    
+                    gt_im1 = torch.nn.functional.interpolate(
+                        gt_im1_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                        mode='bilinear', align_corners=False
+                    ).permute(0,2,3,1)
+                    gt_im2 = torch.nn.functional.interpolate(
+                        gt_im2_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
+                        mode='bilinear', align_corners=False
+                    ).permute(0,2,3,1)
+                    
+                    gt_fail = eval_data['failure'][[0], :EVAL_H].squeeze().to(device)
+                    
+                    for j in range(EVAL_H):
+                        if gt_fail[j] > 0:
+                            gt_im1[j,:,:,0] *= 2
+                            gt_im2[j,:,:,0] *= 2
+                    
+                    gt_imgs = torch.cat([gt_im1, gt_im2], dim=-3)/255.
+                    pred_imgs = torch.cat([im1s, im2s], dim=-3)
+
+                    vid = torch.cat([gt_imgs, pred_imgs], dim=-2)
+                    vid = vid[H:]
+
+                    vid = rearrange(vid, "t h w c -> t c h w")
+                    vid = vid.detach().cpu().numpy()
+                    vid = (vid * 255).clip(0, 255).astype(np.uint8)
+
+                    wandb.log({"video": wandb.Video(vid, fps=20)})
+
+                    # Compute eval loss on held-out batch
+                    eval_data = next(expert_loader_eval)
+
+                    data1 = eval_data['cam_zed_embd'].to(device)
+                    data2 = eval_data['cam_rs_embd'].to(device)
+
+                    inputs1 = data1[:, :BL-1]
+                    inputs2 = data2[:, :BL-1]
+
+                    data_state = eval_data['state'].to(device)
+                    norm_eval_states = normalize_states(
+                        data_state, state_min, state_max, q02=state_q02, q98=state_q98
+                    )
+                    states = norm_eval_states[:, :BL-1]
+
+                    data_acs = eval_data['action'].to(device)
+                    norm_acs = normalize_acs(
+                        data_acs, action_min, action_max, q02=action_q02, q98=action_q98
+                    )
+                    acs = norm_acs[:, :BL-1]
+                    future_len = sample_future_action_window(
+                        action_horizon=action_horizon,
+                        future_action_steps_train=future_action_steps_train,
+                    )
+                    t = BL - 2
+                    future_actions = norm_acs[:, t + 1 : t + 1 + future_len]
+
                     pred1, pred2, pred_state, pred_fail = transition(
                         inputs1, inputs2, states, acs, future_actions
                     )
-                    pred_latent = torch.cat([pred1[:,[-1]], pred2[:,[-1]]], dim=0)
-                    pred_ims, _ = decoder(pred_latent)
+                    target_idx = BL - 1 + future_len
+                    pred_fail_target = pred_fail[:, -1].squeeze(-1)
+                    target_fail = eval_data['failure'][:, target_idx].to(device)
+                    failure_loss = fail_loss(pred_fail_target, target_fail)
+                    loss = failure_loss
+                    print(f"\rIter {i}, Eval Loss: {loss.item():.4f},")
 
-                    pred_ims = rearrange(pred_ims, "(b t) c h w -> b t c h w", t=1)
-                    pred_im1, pred_im2 = torch.split(pred_ims, [inputs1.shape[0], inputs2.shape[0]], dim=0)
+                    os.makedirs(args.checkpoint_dir, exist_ok=True)
+                    # Save latest checkpoint with iteration for resuming
+                    torch.save({
+                        'failure_head_state_dict': transition_module.failure_head.state_dict(),
+                        'iteration': i,
+                    }, os.path.join(args.checkpoint_dir, 'classifier.pth'))
 
-                    pred_im1 = pred_im1[0].permute(0,2,3,1).detach()
-                    pred_im2 = pred_im2[0].permute(0,2,3,1).detach()
-                    pred_fail = pred_fail[:,-1]
+                    if loss < best_eval:
+                        best_eval = loss
+                        print(f"New best at iter {i}, saving model.")
+                        torch.save({
+                            'failure_head_state_dict': transition_module.failure_head.state_dict(),
+                            'best_eval': best_eval.item() if hasattr(best_eval, 'item') else best_eval,
+                            'iteration': i,
+                        }, os.path.join(args.checkpoint_dir, 'best_classifier.pth'))
 
-                    if pred_fail < 0:
-                        pred_im1[:,:,:,0] *= 2
-                        pred_im2[:,:,:,0] *= 2
-                    
-                    im1s = torch.cat([im1s, pred_im1], dim=0)
-                    im2s = torch.cat([im2s, pred_im2], dim=0)
-                    
-                    # getting next inputs
-                    acs = torch.cat([acs[[0], 1:], all_acs[0,H+k].unsqueeze(0).unsqueeze(0)], dim=1)
-                    inputs1 = torch.cat([inputs1[[0], 1:], pred1[:, -1].unsqueeze(1)], dim=1)
-                    inputs2 = torch.cat([inputs2[[0], 1:], pred2[:, -1].unsqueeze(1)], dim=1)
-                    states = torch.cat([states[[0], 1:], pred_state[:,-1].unsqueeze(1)], dim=1)
-                
-                gt_im1_raw = eval_data['agentview_image'][[0], :EVAL_H].squeeze().to(device).float()
-                gt_im2_raw = eval_data['robot0_eye_in_hand_image'][[0], :EVAL_H].squeeze().to(device).float()
-                
-                gt_im1 = torch.nn.functional.interpolate(
-                    gt_im1_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
-                    mode='bilinear', align_corners=False
-                ).permute(0,2,3,1)
-                gt_im2 = torch.nn.functional.interpolate(
-                    gt_im2_raw.permute(0,3,1,2), size=(decoder_h, decoder_w), 
-                    mode='bilinear', align_corners=False
-                ).permute(0,2,3,1)
-                
-                gt_fail = eval_data['failure'][[0], :EVAL_H].squeeze().to(device)
-                
-                for j in range(EVAL_H):
-                    if gt_fail[j] > 0:
-                        gt_im1[j,:,:,0] *= 2
-                        gt_im2[j,:,:,0] *= 2
-                
-                gt_imgs = torch.cat([gt_im1, gt_im2], dim=-3)/255.
-                pred_imgs = torch.cat([im1s, im2s], dim=-3)
+                    transition_module.train()
+                    # --- eval metrics ---
+                    with torch.no_grad():
+                        eval_scores = pred_fail_target.detach().reshape(-1)
+                        eval_labels = target_fail.detach().reshape(-1)
+                        tp, fn, fp, tn = _compute_confusion(eval_scores, eval_labels, threshold=0.0)
+                        precision, recall, f1 = _precision_recall_f1(tp, fn, fp)
 
-                vid = torch.cat([gt_imgs, pred_imgs], dim=-2)
-                vid = vid[H:]
+                        thresholds = [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0]
+                        sweep = {}
+                        for thr in thresholds:
+                            ttp, tfn, tfp, _ = _compute_confusion(eval_scores, eval_labels, threshold=thr)
+                            p, r, f = _precision_recall_f1(ttp, tfn, tfp)
+                            sweep[f"eval/precision@{thr}"] = p.item()
+                            sweep[f"eval/recall@{thr}"] = r.item()
+                            sweep[f"eval/f1@{thr}"] = f.item()
 
-                vid = rearrange(vid, "t h w c -> t c h w")
-                vid = vid.detach().cpu().numpy()
-                vid = (vid * 255).clip(0, 255).astype(np.uint8)
-
-                wandb.log({"video": wandb.Video(vid, fps=20)})
-
-                # Compute eval loss on held-out batch
-                eval_data = next(expert_loader_eval)
-
-                data1 = eval_data['cam_zed_embd'].to(device)
-                data2 = eval_data['cam_rs_embd'].to(device)
-
-                inputs1 = data1[:, :BL-1]
-                inputs2 = data2[:, :BL-1]
-
-                data_state = eval_data['state'].to(device)
-                norm_eval_states = normalize_states(
-                    data_state, state_min, state_max, q02=state_q02, q98=state_q98
-                )
-                states = norm_eval_states[:, :BL-1]
-
-                data_acs = eval_data['action'].to(device)
-                norm_acs = normalize_acs(
-                    data_acs, action_min, action_max, q02=action_q02, q98=action_q98
-                )
-                acs = norm_acs[:, :BL-1]
-                future_len = sample_future_action_window(
-                    action_horizon=action_horizon,
-                    future_action_steps_train=future_action_steps_train,
-                )
-                t = BL - 2
-                future_actions = norm_acs[:, t + 1 : t + 1 + future_len]
-
-                pred1, pred2, pred_state, pred_fail = transition(
-                    inputs1, inputs2, states, acs, future_actions
-                )
-                target_idx = BL - 1 + future_len
-                pred_fail_target = pred_fail[:, -1].squeeze(-1)
-                target_fail = eval_data['failure'][:, target_idx].to(device)
-                failure_loss = fail_loss(pred_fail_target, target_fail)
-                loss = failure_loss
-            print(f"\rIter {i}, Eval Loss: {loss.item():.4f},")
-
-            os.makedirs(args.checkpoint_dir, exist_ok=True)
-            # Save latest checkpoint with iteration for resuming
-            torch.save({
-                'failure_head_state_dict': transition.failure_head.state_dict(),
-                'iteration': i,
-            }, os.path.join(args.checkpoint_dir, 'classifier.pth'))
-
-            if loss < best_eval:
-                best_eval = loss
-                print(f"New best at iter {i}, saving model.")
-                torch.save({
-                    'failure_head_state_dict': transition.failure_head.state_dict(),
-                    'best_eval': best_eval.item() if hasattr(best_eval, 'item') else best_eval,
-                    'iteration': i,
-                }, os.path.join(args.checkpoint_dir, 'best_classifier.pth'))
-
-            
-            transition.train()
-            # --- eval metrics ---
-            with torch.no_grad():
-                eval_scores = pred_fail_target.detach().reshape(-1)
-                eval_labels = target_fail.detach().reshape(-1)
-                tp, fn, fp, tn = _compute_confusion(eval_scores, eval_labels, threshold=0.0)
-                precision, recall, f1 = _precision_recall_f1(tp, fn, fp)
-
-                thresholds = [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0]
-                sweep = {}
-                for thr in thresholds:
-                    ttp, tfn, tfp, _ = _compute_confusion(eval_scores, eval_labels, threshold=thr)
-                    p, r, f = _precision_recall_f1(ttp, tfn, tfp)
-                    sweep[f"eval/precision@{thr}"] = p.item()
-                    sweep[f"eval/recall@{thr}"] = r.item()
-                    sweep[f"eval/f1@{thr}"] = f.item()
-
-            wandb.log({
-                'eval_loss': loss.item(),
-                'eval/tp': tp.item(),
-                'eval/fn': fn.item(),
-                'eval/fp': fp.item(),
-                'eval/tn': tn.item(),
-                'eval/precision': precision.item(),
-                'eval/recall': recall.item(),
-                'eval/f1': f1.item(),
-                **sweep,
-            })
+                    wandb.log({
+                        'eval_loss': loss.item(),
+                        'eval/tp': tp.item(),
+                        'eval/fn': fn.item(),
+                        'eval/fp': fp.item(),
+                        'eval/tn': tn.item(),
+                        'eval/precision': precision.item(),
+                        'eval/recall': recall.item(),
+                        'eval/f1': f1.item(),
+                        **sweep,
+                    })
+            if is_distributed:
+                torch.distributed.barrier()
 
     best_eval_val = best_eval.item() if hasattr(best_eval, 'item') else best_eval
-    print(f"\nTraining complete. Best eval loss: {best_eval_val:.4f}")
+    if is_rank0:
+        print(f"\nTraining complete. Best eval loss: {best_eval_val:.4f}")
+    if is_distributed:
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
