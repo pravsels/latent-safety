@@ -1,0 +1,40 @@
+# Default configuration for training DINO failure classifier head.
+# Usage:
+#   python dino_wm/train_dino_classifier.py --config configs/dino_classifier_config.yaml
+
+# Data
+hdf5_file: bin_pick_pack_combined_labeled_dino3.h5
+dataset_stats: bin_pick_pack_combined_labeled_stats.json
+action_key: actions_delta
+test_frac: 0.1
+num_test_trajectories: null
+
+# Training
+batch_size: 256
+sequence_length: 4
+context_length: 3
+eval_horizon: 16
+train_iters: 10000
+eval_interval: 500
+learning_rate: 5.0e-5
+seed: 0
+device: "cuda:0"
+
+# Future-action conditioning (fixed max horizon)
+action_horizon: 100
+# Maximum number of future actions to sample for training (from 1 to action_horizon per batch)
+future_action_steps_train: 100
+
+# Model / checkpoints
+dino_version: v3
+decoder_checkpoint: dino3_decoder_checkpoints/best_decoder.pth
+wm_checkpoint: dino3_wm_checkpoints/best_wm.pth
+checkpoint_dir: dino3_classifier_checkpoints
+resume_checkpoint: null
+start_iter: 0
+
+# WandB
+wandb_mode: offline
+wandb_project: latent-safety
+wandb_entity: pravsels
+wandb_name: cubes_push_classifier

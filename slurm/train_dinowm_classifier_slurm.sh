@@ -28,18 +28,10 @@ WANDB_DIR="${data_dir}/wandb"
 WANDB_CACHE_DIR="${data_dir}/wandb_cache"
 WANDB_CONFIG_DIR="${data_dir}/wandb_config"
 
-# Training config (weights and checkpoints on scratch due to limited home storage)
-HDF5_FILE="${data_dir}/cubes_push_labeled_combined_v3.h5"
-DATASET_STATS="${data_dir}/cubes_push_labeled_dataset_stats.json"
-DECODER_CHECKPOINT="${data_dir}/dino3_decoder_checkpoints/best_decoder.pth"
-WM_CHECKPOINT="${data_dir}/dino3_wm_checkpoints/best_wm.pth"
-CHECKPOINT_DIR="${data_dir}/dino3_classifier_checkpoints"
-BATCH_SIZE=256
-SEQUENCE_LENGTH=4
-WANDB_PROJECT="latent-safety"
-WANDB_NAME="cubes_push_classifier"
+# Training config (primarily managed via YAML)
+CONFIG_FILE="${repo_dir}/configs/dino_classifier_config.yaml"
 
-mkdir -p "${CHECKPOINT_DIR}" "${repo_dir}/logs" "${PYTHON_EXT_DIR}" \
+mkdir -p "${repo_dir}/logs" "${PYTHON_EXT_DIR}" \
   "${HF_CACHE}" "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
 
 start_time="$(date -Is --utc)"
@@ -52,19 +44,10 @@ echo "===================================="
 # Resume from iteration 3001 (previous run completed iter 3000)
 # Note: Once a new checkpoint is saved with iteration info, this can be removed
 # and the script will auto-resume from the stored iteration.
-START_ITER=3001
+# START_ITER=3001
 
 TRAIN_CMD="python dino_wm/train_dino_classifier.py \
-    --hdf5-file ${HDF5_FILE} \
-    --dataset-stats ${DATASET_STATS} \
-    --dino-version v3 \
-    --decoder-checkpoint ${DECODER_CHECKPOINT} \
-    --wm-checkpoint ${WM_CHECKPOINT} \
-    --batch-size ${BATCH_SIZE} \
-    --sequence-length ${SEQUENCE_LENGTH} \
-    --wandb-project ${WANDB_PROJECT} \
-    --wandb-name ${WANDB_NAME} \
-    --checkpoint-dir ${CHECKPOINT_DIR} \
+    --config ${CONFIG_FILE} \
     --start-iter ${START_ITER}"
 
 echo "Running training command..."
@@ -80,6 +63,7 @@ apptainer exec --nv \
     --env "HF_HOME=/root/.cache/huggingface" \
     "${container}" \
     bash -c "export PYTHONPATH=${PYTHON_EXT_DIR}:${repo_dir}:\$PYTHONPATH && \
+        export LATENT_SAFETY_DATA_ROOT=${data_dir} && \
         export WANDB_DIR=${WANDB_DIR} WANDB_CACHE_DIR=${WANDB_CACHE_DIR} WANDB_CONFIG_DIR=${WANDB_CONFIG_DIR} && \
         ${TRAIN_CMD}"
 EXIT_CODE=$?

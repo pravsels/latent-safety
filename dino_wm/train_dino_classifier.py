@@ -25,6 +25,7 @@ Resume from explicit checkpoint:
 
 import argparse
 import os
+import sys
 import h5py
 import json
 import numpy as np
@@ -38,7 +39,14 @@ from tqdm import tqdm
 
 from dino_decoder import VQVAE
 from test_loader import SplitTrajectoryDataset
-from dino_models import VideoTransformer, normalize_acs, normalize_states
+from dino_models import (
+    FUTURE_ACTION_HORIZON_MAX,
+    VideoTransformer,
+    normalize_acs,
+    normalize_states,
+)
+from checkpoint_utils import filter_state_dict_by_shape
+from train_wm_common import load_yaml_config as _load_yaml_config, sample_future_action_window
 from dino_wm.config import (
     MODEL_CONFIG,
     TRAIN_CONFIG,
@@ -98,16 +106,50 @@ def _precision_recall_f1(tp, fn, fp):
     return precision, recall, f1
 
 
-def main():
+def _resolve_data_path(path: str | None, *, prefer_data_root: bool = False) -> str | None:
+    """
+    Resolve possibly-relative paths with optional scratch-root fallback.
+
+    If LATENT_SAFETY_DATA_ROOT is set (e.g., by SLURM script), relative paths can be
+    resolved under that directory instead of repo cwd.
+    """
+    if path is None:
+        return None
+    expanded = os.path.expanduser(os.path.expandvars(path))
+    if os.path.isabs(expanded):
+        return expanded
+
+    data_root = os.environ.get("LATENT_SAFETY_DATA_ROOT")
+    if data_root:
+        candidate = os.path.join(data_root, expanded)
+        if prefer_data_root or not os.path.exists(expanded):
+            return candidate
+    return expanded
+
+
+def parse_args(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        "--config",
+        type=str,
+        default=os.path.join("configs", "dino_classifier_config.yaml"),
+        help="Path to YAML config file (default: configs/dino_classifier_config.yaml). CLI flags override it.",
+    )
+    pre_args, remaining_argv = pre_parser.parse_known_args(argv)
+    cfg = _load_yaml_config(pre_args.config)
+
     parser = argparse.ArgumentParser(
-        description="Train failure classifier on top of frozen DINO World Model"
+        description="Train failure classifier on top of frozen DINO World Model",
+        parents=[pre_parser],
     )
     parser.add_argument(
         "--hdf5-file",
         "--hdf5",
         dest="hdf5_file",
         type=str,
-        required=True,
+        default=None,
         help="Path to HDF5 file. Will be split into train/test using --test-frac.",
     )
     parser.add_argument(
@@ -208,6 +250,21 @@ def main():
         help="Learning rate for failure head (default: 5e-5).",
     )
     parser.add_argument(
+        "--action-horizon",
+        type=int,
+        default=FUTURE_ACTION_HORIZON_MAX,
+        help=(
+            "Maximum future-action horizon expected by trajectory encoder "
+            f"(default: {FUTURE_ACTION_HORIZON_MAX})."
+        ),
+    )
+    parser.add_argument(
+        "--future-action-steps-train",
+        type=int,
+        default=50,
+        help="Max number of future actions to sample for training (default: 50).",
+    )
+    parser.add_argument(
         "--wandb-mode",
         type=str,
         default="offline",
@@ -250,7 +307,21 @@ def main():
         default=0,
         help="Iteration to start training from (default: 0).",
     )
-    args = parser.parse_args()
+    known_dests = {a.dest for a in parser._actions}
+    for k, v in (cfg or {}).items():
+        if k in known_dests:
+            parser.set_defaults(**{k: v})
+
+    return parser.parse_args(remaining_argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    if args.hdf5_file is None:
+        raise ValueError(
+            "Missing --hdf5-file. Provide it via CLI or set hdf5_file in the YAML config."
+        )
 
     if args.decoder_checkpoint is None:
         args.decoder_checkpoint = (
@@ -270,6 +341,15 @@ def main():
             if args.dino_version == "v3"
             else "dino2_wm_checkpoints"
         )
+
+    # Resolve config paths. In SLURM, LATENT_SAFETY_DATA_ROOT can redirect relative
+    # data/checkpoint paths to scratch storage without hardcoding absolute paths in YAML.
+    args.hdf5_file = _resolve_data_path(args.hdf5_file)
+    args.dataset_stats = _resolve_data_path(args.dataset_stats)
+    args.decoder_checkpoint = _resolve_data_path(args.decoder_checkpoint)
+    args.wm_checkpoint = _resolve_data_path(args.wm_checkpoint)
+    args.resume_checkpoint = _resolve_data_path(args.resume_checkpoint)
+    args.checkpoint_dir = _resolve_data_path(args.checkpoint_dir, prefer_data_root=True)
 
     # Initialize wandb
     wandb.init(
@@ -294,6 +374,16 @@ def main():
     EVAL_H = args.eval_horizon
     H = args.context_length
     device = args.device
+    action_horizon = int(args.action_horizon)
+    future_action_steps_train = int(args.future_action_steps_train)
+
+    if action_horizon < 1:
+        raise ValueError(f"--action-horizon must be >= 1 (got {action_horizon}).")
+    if future_action_steps_train < 1:
+        raise ValueError(
+            f"--future-action-steps-train must be >= 1 (got {future_action_steps_train})."
+        )
+    max_future_len = min(action_horizon, future_action_steps_train)
 
     # Load state normalization stats
     stats_path = args.dataset_stats
@@ -344,14 +434,19 @@ def main():
     if num_traj - num_test < 1 and num_traj > 1:
         num_test = num_traj - 1
     
+    # Classifier predicts over BL-1 context frames, and additionally conditions on a
+    # variable-size chunk of future actions after the context window.
+    train_segment_len = BL + max_future_len
+    eval_segment_len = max(32, EVAL_H + max_future_len)
+
     expert_data = SplitTrajectoryDataset(
-        hdf5_file, BL, split='train', num_test=num_test, action_key=args.action_key
+        hdf5_file, train_segment_len, split='train', num_test=num_test, action_key=args.action_key
     )
     expert_data_eval = SplitTrajectoryDataset(
-        hdf5_file, BL, split='test', num_test=num_test, action_key=args.action_key
+        hdf5_file, train_segment_len, split='test', num_test=num_test, action_key=args.action_key
     )
     expert_data_imagine = SplitTrajectoryDataset(
-        hdf5_file, 32, split='test', num_test=num_test, action_key=args.action_key
+        hdf5_file, eval_segment_len, split='test', num_test=num_test, action_key=args.action_key
     )
     
     print(f"Dataset: {hdf5_file}")
@@ -384,6 +479,7 @@ def main():
         state_dim=state_dim,
         action_dim=action_dim,
         num_frames=BL-1,
+        action_horizon=action_horizon,
         dino_version=args.dino_version,
         **MODEL_CONFIG
     ).to(device)
@@ -392,9 +488,20 @@ def main():
     print(f"Loading world model from {args.wm_checkpoint}")
     wm_ckpt = torch.load(args.wm_checkpoint, map_location=device)
     if isinstance(wm_ckpt, dict) and 'model_state_dict' in wm_ckpt:
-        transition.load_state_dict(wm_ckpt['model_state_dict'])
+        wm_state = wm_ckpt['model_state_dict']
     else:
-        transition.load_state_dict(wm_ckpt)
+        wm_state = wm_ckpt
+    filtered, missing, unexpected, mismatched = filter_state_dict_by_shape(
+        transition.state_dict(),
+        wm_state,
+    )
+    transition.load_state_dict(filtered, strict=False)
+    if missing:
+        print(f"Warning: missing {len(missing)} keys from world-model checkpoint.")
+    if unexpected:
+        print(f"Warning: world-model checkpoint has {len(unexpected)} unexpected keys.")
+    if mismatched:
+        print(f"Warning: skipped {len(mismatched)} mismatched world-model keys.")
 
     # Freeze all parameters except failure head
     for name, param in transition.named_parameters():
@@ -485,26 +592,39 @@ def main():
 
         data1 = data['cam_zed_embd'].to(device)
         data2 = data['cam_rs_embd'].to(device)
-        inputs1 = data1[:, :-1]
-        inputs2 = data2[:, :-1]
+        inputs1 = data1[:, :BL-1]
+        inputs2 = data2[:, :BL-1]
 
         data_state = data['state'].to(device)
         norm_states = normalize_states(
             data_state, state_min, state_max, q02=state_q02, q98=state_q98
         )
-        states = norm_states[:, :-1]
+        states = norm_states[:, :BL-1]
 
         data_acs = data['action'].to(device)
         norm_acs = normalize_acs(
             data_acs, action_min, action_max, q02=action_q02, q98=action_q98
         )
-        acs = norm_acs[:, :-1]
+        acs = norm_acs[:, :BL-1]
+        future_len = sample_future_action_window(
+            action_horizon=action_horizon,
+            future_action_steps_train=future_action_steps_train,
+        )
+        t = BL - 2
+        future_actions = norm_acs[:, t + 1 : t + 1 + future_len]
         
         optimizer.zero_grad()
 
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs)
-            failure_loss = fail_loss(pred_fail, data['failure'][:, 1:].to(device))
+            pred1, pred2, pred_state, pred_fail = transition(
+                inputs1, inputs2, states, acs, future_actions
+            )
+            # Context indices are [0 .. BL-2] (e.g., BL=4 -> {BL-4, BL-3, BL-2} = {0,1,2});
+            # with future_len actions starting at BL-1, target is one step after: (BL-2)+future_len+1.
+            target_idx = BL - 1 + future_len 
+            pred_fail_target = pred_fail[:, -1].squeeze(-1)
+            target_fail = data['failure'][:, target_idx].to(device)
+            failure_loss = fail_loss(pred_fail_target, target_fail)
             loss = failure_loss
         
         scaler.scale(loss).backward()
@@ -553,7 +673,11 @@ def main():
                 ).permute(0,2,3,1)
                 
                 for k in range(EVAL_H-H):
-                    pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs)
+                    t = (H - 1) + k
+                    future_actions = all_acs[:, t + 1 : t + 1 + max_future_len]
+                    pred1, pred2, pred_state, pred_fail = transition(
+                        inputs1, inputs2, states, acs, future_actions
+                    )
                     pred_latent = torch.cat([pred1[:,[-1]], pred2[:,[-1]]], dim=0)
                     pred_ims, _ = decoder(pred_latent)
 
@@ -614,24 +738,34 @@ def main():
                 data1 = eval_data['cam_zed_embd'].to(device)
                 data2 = eval_data['cam_rs_embd'].to(device)
 
-                inputs1 = data1[:, :-1]
-                inputs2 = data2[:, :-1]
+                inputs1 = data1[:, :BL-1]
+                inputs2 = data2[:, :BL-1]
 
                 data_state = eval_data['state'].to(device)
                 norm_eval_states = normalize_states(
                     data_state, state_min, state_max, q02=state_q02, q98=state_q98
                 )
-                states = norm_eval_states[:, :-1]
+                states = norm_eval_states[:, :BL-1]
 
                 data_acs = eval_data['action'].to(device)
                 norm_acs = normalize_acs(
                     data_acs, action_min, action_max, q02=action_q02, q98=action_q98
                 )
-                acs = norm_acs[:, :-1]
+                acs = norm_acs[:, :BL-1]
+                future_len = sample_future_action_window(
+                    action_horizon=action_horizon,
+                    future_action_steps_train=future_action_steps_train,
+                )
+                t = BL - 2
+                future_actions = norm_acs[:, t + 1 : t + 1 + future_len]
 
-                pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs)
-                
-                failure_loss = fail_loss(pred_fail, eval_data['failure'][:, 1:].to(device))
+                pred1, pred2, pred_state, pred_fail = transition(
+                    inputs1, inputs2, states, acs, future_actions
+                )
+                target_idx = BL - 1 + future_len
+                pred_fail_target = pred_fail[:, -1].squeeze(-1)
+                target_fail = eval_data['failure'][:, target_idx].to(device)
+                failure_loss = fail_loss(pred_fail_target, target_fail)
                 loss = failure_loss
             print(f"\rIter {i}, Eval Loss: {loss.item():.4f},")
 
@@ -655,8 +789,8 @@ def main():
             transition.train()
             # --- eval metrics ---
             with torch.no_grad():
-                eval_scores = pred_fail.detach().reshape(-1)
-                eval_labels = eval_data['failure'][:, 1:].to(device).detach().reshape(-1)
+                eval_scores = pred_fail_target.detach().reshape(-1)
+                eval_labels = target_fail.detach().reshape(-1)
                 tp, fn, fp, tn = _compute_confusion(eval_scores, eval_labels, threshold=0.0)
                 precision, recall, f1 = _precision_recall_f1(tp, fn, fp)
 
