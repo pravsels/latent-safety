@@ -467,8 +467,11 @@ def main(argv=None):
             expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
 
         data = next(expert_loader)
-        data1 = data[args.front_latent_key].to(device)
-        data2 = data[args.wrist_latent_key].to(device)
+        # SplitTrajectoryDataset always exposes front/wrist latents under
+        # cam_zed_embd/cam_rs_embd; with WAN config these tensors come from
+        # args.front_latent_key/args.wrist_latent_key (e.g., wan_front_embd/wan_wrist_embd).
+        data1 = data["cam_zed_embd"].to(device)
+        data2 = data["cam_rs_embd"].to(device)
         inputs1 = data1[:, : bl - 1]
         inputs2 = data2[:, : bl - 1]
 
@@ -510,8 +513,8 @@ def main(argv=None):
                 eval_data = next(expert_loader_imagine)
                 transition_module.eval()
                 with torch.no_grad():
-                    eval_front = eval_data[args.front_latent_key].to(device)
-                    eval_wrist = eval_data[args.wrist_latent_key].to(device)
+                    eval_front = eval_data["cam_zed_embd"].to(device)
+                    eval_wrist = eval_data["cam_rs_embd"].to(device)
                     inputs1 = eval_front[[0], :h]
                     inputs2 = eval_wrist[[0], :h]
                     all_acs = normalize_acs(
@@ -584,8 +587,8 @@ def main(argv=None):
                         wandb.log({"video": wandb.Video(vid, fps=20, format="mp4")})
 
                     heldout = next(expert_loader_eval)
-                    held_front = heldout[args.front_latent_key].to(device)
-                    held_wrist = heldout[args.wrist_latent_key].to(device)
+                    held_front = heldout["cam_zed_embd"].to(device)
+                    held_wrist = heldout["cam_rs_embd"].to(device)
                     inputs1 = held_front[:, : bl - 1]
                     inputs2 = held_wrist[:, : bl - 1]
                     states = normalize_states(
