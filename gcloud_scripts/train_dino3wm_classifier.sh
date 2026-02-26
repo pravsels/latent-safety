@@ -56,6 +56,7 @@ echo ""
 set +e
 docker run --rm --gpus all \
   --ipc=host \
+  --shm-size=8g \
   --network=host \
   -v "${HOST_ROOT}:/workspace/latent_safety" \
   -w /workspace/latent_safety \
