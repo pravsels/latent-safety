@@ -472,13 +472,16 @@ def main(argv=None):
     eval_segment_len = max(32, EVAL_H + max_future_len)
 
     expert_data = SplitTrajectoryDataset(
-        hdf5_file, train_segment_len, split='train', num_test=num_test, action_key=args.action_key
+        hdf5_file, train_segment_len, split='train', num_test=num_test, action_key=args.action_key,
+        load_images=False,
     )
     expert_data_eval = SplitTrajectoryDataset(
-        hdf5_file, train_segment_len, split='test', num_test=num_test, action_key=args.action_key
+        hdf5_file, train_segment_len, split='test', num_test=num_test, action_key=args.action_key,
+        load_images=False,
     )
     expert_data_imagine = SplitTrajectoryDataset(
-        hdf5_file, eval_segment_len, split='test', num_test=num_test, action_key=args.action_key
+        hdf5_file, eval_segment_len, split='test', num_test=num_test, action_key=args.action_key,
+        load_images=args.log_eval_video,
     )
     
     print(f"Dataset: {hdf5_file}")
