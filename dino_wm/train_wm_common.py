@@ -129,6 +129,7 @@ def build_train_loader(
     is_distributed: bool,
     rank: int,
     world_size: int,
+    num_workers: int = 4,
 ) -> tuple[DataLoader, DistributedSampler | None]:
     if is_distributed:
         sampler = DistributedSampler(
@@ -137,10 +138,10 @@ def build_train_loader(
             rank=rank,
             shuffle=True,
         )
-        loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+        loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, persistent_workers=num_workers > 0)
     else:
         sampler = None
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, persistent_workers=num_workers > 0)
     return loader, sampler
 
 

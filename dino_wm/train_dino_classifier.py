@@ -326,6 +326,12 @@ def parse_args(argv=None):
         default=0,
         help="Iteration to start training from (default: 0).",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of DataLoader worker processes for parallel data loading (default: 4).",
+    )
     known_dests = {a.dest for a in parser._actions}
     for k, v in (cfg or {}).items():
         if k in known_dests:
@@ -485,11 +491,12 @@ def main(argv=None):
         is_distributed=is_distributed,
         rank=rank,
         world_size=world_size,
+        num_workers=args.num_workers,
     )
     expert_loader = iter(train_loader)
     if is_rank0:
-        expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
-        expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
+        expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True, num_workers=args.num_workers, persistent_workers=args.num_workers > 0))
+        expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True, num_workers=args.num_workers, persistent_workers=args.num_workers > 0))
     else:
         expert_loader_eval = None
         expert_loader_imagine = None
@@ -648,12 +655,13 @@ def main(argv=None):
                 is_distributed=is_distributed,
                 rank=rank,
                 world_size=world_size,
+                num_workers=args.num_workers,
             )
             expert_loader = iter(train_loader)
         if is_rank0 and i > 0 and i % len(expert_loader_eval) == 0:
-            expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True))
+            expert_loader_eval = iter(DataLoader(expert_data_eval, batch_size=BS, shuffle=True, num_workers=args.num_workers, persistent_workers=args.num_workers > 0))
         if is_rank0 and i > 0 and i % len(expert_loader_imagine) == 0:
-            expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True))
+            expert_loader_imagine = iter(DataLoader(expert_data_imagine, batch_size=1, shuffle=True, num_workers=args.num_workers, persistent_workers=args.num_workers > 0))
 
         data = next(expert_loader)
 
