@@ -2,7 +2,7 @@
 #SBATCH --job-name=wan_wm
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
-#SBATCH --ntasks-per-node=3
+#SBATCH --ntasks-per-node=4
 #SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=0G
@@ -75,7 +75,7 @@ echo "SLURM vars: SLURM_NODELIST=${SLURM_NODELIST}, SLURM_NTASKS=${SLURM_NTASKS}
 echo ""
 
 set +e
-srun --ntasks=3 --gpus=4 --cpu-bind=cores \
+srun --ntasks=4 --gpus=4 --cpu-bind=cores \
 apptainer exec --nv \
     --pwd "${repo_dir}" \
     --bind "${scratch_dir}:${scratch_dir}" \
