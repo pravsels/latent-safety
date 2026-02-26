@@ -292,6 +292,7 @@ def build_split_datasets(
     action_key: str,
     front_latent_key: str,
     wrist_latent_key: str,
+    load_images: bool = False,
 ):
     """
     Build train/test/imagine split datasets and return metadata.
@@ -317,10 +318,11 @@ def build_split_datasets(
         action_key=action_key,
         front_embd_key=front_latent_key,
         wrist_embd_key=wrist_latent_key,
+        load_images=False,
     )
     expert_data = dataset_cls(split="train", **kwargs)
     expert_data_eval = dataset_cls(split="test", **kwargs)
-    expert_data_imagine = dataset_cls(split="test", **kwargs)
+    expert_data_imagine = dataset_cls(split="test", load_images=load_images, **{k: v for k, v in kwargs.items() if k != "load_images"})
     return {
         "expert_data": expert_data,
         "expert_data_eval": expert_data_eval,

@@ -337,6 +337,7 @@ def main(argv=None):
         action_key=args.action_key,
         front_embd_key=args.front_latent_key,
         wrist_embd_key=args.wrist_latent_key,
+        load_images=False,
     )
     expert_data_eval = SplitTrajectoryDataset(
         args.hdf5_file,
@@ -346,6 +347,7 @@ def main(argv=None):
         action_key=args.action_key,
         front_embd_key=args.front_latent_key,
         wrist_embd_key=args.wrist_latent_key,
+        load_images=False,
     )
     expert_data_imagine = SplitTrajectoryDataset(
         args.hdf5_file,
@@ -355,6 +357,7 @@ def main(argv=None):
         action_key=args.action_key,
         front_embd_key=args.front_latent_key,
         wrist_embd_key=args.wrist_latent_key,
+        load_images=args.log_eval_video,
     )
     if is_rank0:
         print(f"Dataset: {args.hdf5_file}")

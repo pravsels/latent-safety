@@ -454,13 +454,13 @@ def main():
         num_test = num_traj - 1
     
     expert_data = SplitTrajectoryDataset(
-        hdf5_file, BL, split='train', num_test=num_test, action_key=args.action_key
+        hdf5_file, BL, split='train', num_test=num_test, action_key=args.action_key, load_images=False,
     )
     expert_data_eval = SplitTrajectoryDataset(
-        hdf5_file, BL, split='test', num_test=num_test, action_key=args.action_key
+        hdf5_file, BL, split='test', num_test=num_test, action_key=args.action_key, load_images=False,
     )
     expert_data_imagine = SplitTrajectoryDataset(
-        hdf5_file, 32, split='test', num_test=num_test, action_key=args.action_key
+        hdf5_file, 32, split='test', num_test=num_test, action_key=args.action_key, load_images=args.log_eval_video,
     )
     
     print(f"Dataset: {hdf5_file}")
