@@ -49,7 +49,7 @@ docker run --rm --gpus all \
   -v "${HOST_ROOT}:/workspace/latent_safety" \
   -w /workspace/latent_safety \
   "${IMAGE}" \
-  bash -lc "python dino_wm/train_dino_classifier.py \
+  bash -lc "PYTHONFAULTHANDLER=1 python dino_wm/train_dino_classifier.py \
     --config ${CONFIG_PATH} \
     --hdf5-file ${HDF5_FILE} \
     --dataset-stats ${DATASET_STATS} \
@@ -58,7 +58,8 @@ docker run --rm --gpus all \
     --checkpoint-dir ${CLASSIFIER_CKPT_DIR} \
     --wandb-mode ${WANDB_MODE} \
     --wandb-project ${WANDB_PROJECT} \
-    --wandb-name ${WANDB_NAME}" \
+    --wandb-name ${WANDB_NAME} \
+    --eval-interval 100" \
   2>&1 | tee "${LOG_FILE}"
 EXIT_CODE=${PIPESTATUS[0]}
 set -e
