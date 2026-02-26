@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# -e: exit on error, -u: error on unset vars, -o pipefail: catch failures in pipes
 set -euo pipefail
 
 # ---------------------------
@@ -40,8 +41,18 @@ echo "Log file: ${LOG_FILE}"
 echo "===================================="
 
 # ---------------------------
+# Sanity check: CUDA must be available inside the container
+# ---------------------------
+echo "Checking CUDA availability inside container..."
+docker run --rm --gpus all "${IMAGE}" \
+  python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available!'; print(f'CUDA OK — {torch.cuda.device_count()} GPU(s): {torch.cuda.get_device_name(0)}')"
+echo ""
+
+# ---------------------------
 # Launch training in container
 # ---------------------------
+# Disable exit-on-error so we can capture the exit code manually via PIPESTATUS
+# (the docker | tee pipeline would otherwise abort the script on non-zero exit)
 set +e
 docker run --rm --gpus all \
   --ipc=host \
@@ -61,8 +72,8 @@ docker run --rm --gpus all \
     --wandb-name ${WANDB_NAME} \
     --eval-interval 100" \
   2>&1 | tee "${LOG_FILE}"
-EXIT_CODE=${PIPESTATUS[0]}
-set -e
+EXIT_CODE=${PIPESTATUS[0]}  # exit code of docker, not tee
+set -e  # re-enable exit-on-error for the rest of the script
 
 END_TIME="$(date -Is --utc)"
 echo ""
