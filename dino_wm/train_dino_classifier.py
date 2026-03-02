@@ -758,7 +758,7 @@ def main(argv=None):
                         for k in range(EVAL_H-H):
                             t = (H - 1) + k
                             future_actions = all_acs[:, t + 1 : t + 1 + max_future_len]
-                            pred1, pred2, pred_state, pred_fail = transition(
+                            pred1, pred2, pred_state, pred_fail = transition_module(
                                 inputs1, inputs2, states, acs, future_actions
                             )
                             pred_latent = torch.cat([pred1[:,[-1]], pred2[:,[-1]]], dim=0)
@@ -842,7 +842,7 @@ def main(argv=None):
                     t = BL - 2
                     future_actions = norm_acs[:, t + 1 : t + 1 + future_len]
 
-                    pred1, pred2, pred_state, pred_fail = transition(
+                    pred1, pred2, pred_state, pred_fail = transition_module(
                         inputs1, inputs2, states, acs, future_actions
                     )
                     target_idx = BL - 1 + future_len

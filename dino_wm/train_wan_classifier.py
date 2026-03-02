@@ -550,7 +550,7 @@ def main(argv=None):
                         for k in range(eval_h - h):
                             t = (h - 1) + k
                             future_actions = all_acs[:, t + 1 : t + 1 + max_future_len]
-                            pred1, pred2, pred_state, pred_fail = transition(inputs1, inputs2, states, acs, future_actions)
+                            pred1, pred2, pred_state, pred_fail = transition_module(inputs1, inputs2, states, acs, future_actions)
 
                             pred_im1 = wan_decoder.decode_tokens(pred1[:, [-1]]).squeeze(0).squeeze(0)
                             pred_im2 = wan_decoder.decode_tokens(pred2[:, [-1]]).squeeze(0).squeeze(0)
@@ -607,7 +607,7 @@ def main(argv=None):
                     )
                     t = bl - 2
                     future_actions = norm_acs[:, t + 1 : t + 1 + future_len]
-                    _, _, _, pred_fail = transition(inputs1, inputs2, states, acs, future_actions)
+                    _, _, _, pred_fail = transition_module(inputs1, inputs2, states, acs, future_actions)
                     target_idx = bl - 1 + future_len
                     pred_fail_target = pred_fail[:, -1].squeeze(-1)
                     target_fail = heldout["failure"][:, target_idx].to(device)
