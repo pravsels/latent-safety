@@ -11,7 +11,6 @@ Usage:
         --dataset villekuosmanen/fail_bil_pick_capsules_drop_on_table \
         --episode 0 \
         --wm-checkpoint wan_wm_checkpoints/best_wm.pth \
-        --dataset-stats wan_wm_checkpoints/dataset_stats.json \
         --future-action-steps 50 \
         --context-length 3
 """
@@ -22,6 +21,8 @@ import sys
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+
+DEFAULT_DATASET_STATS = "arx5_datasets_6Feb_26_stats.json"
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
@@ -42,7 +43,7 @@ def parse_args():
     p.add_argument("--episode", type=int, default=0, help="Episode index")
     p.add_argument("--wm-checkpoint", default="wan_wm_checkpoints/best_wm.pth",
                    help="Path to WM checkpoint .pth")
-    p.add_argument("--dataset-stats", default="wan_wm_checkpoints/dataset_stats.json",
+    p.add_argument("--dataset-stats", default=DEFAULT_DATASET_STATS,
                    help="Path to normalization stats JSON")
     p.add_argument("--wan-vae-model", default="ByteDance/Video-As-Prompt-Wan2.1-14B",
                    help="WAN VAE model ID or local path")
